@@ -557,16 +557,6 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 椅子の統計はここで加算する。通知の送信時点で加算すると、評価から通知が届くまでの
-	// 間に統計を読んだリクエストが 1 少ない値を返す。
-	if ride.ChairID.Valid {
-		if _, err := tx.ExecContext(ctx, `
-UPDATE chairs SET completed_rides = completed_rides + 1, total_evaluation = total_evaluation + ?
-WHERE id = ?`, req.Evaluation, ride.ChairID.String); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-	}
 
 	if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE id = ?`, rideID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -715,7 +705,22 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if yetSentRideStatus.ID != "" {
-		if _, err := db.ExecContext(ctx, `UPDATE ride_statuses SET app_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ?`, yetSentRideStatus.ID); err != nil {
+		// ベンチマーカーは「ユーザーに COMPLETED を通知したライド」で椅子の統計を数える。
+		// 送信済みの印と統計を別文で更新すると、その隙間で統計を読んだ別のリクエストが
+		// 通知済み件数と食い違う値を返すため、1 文にまとめて原子的に進める。
+		// app_sent_at IS NULL の条件で、同じ行を二重に数えることも防ぐ。
+		query := `UPDATE ride_statuses SET app_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ? AND app_sent_at IS NULL`
+		if yetSentRideStatus.Status == "COMPLETED" {
+			query = `
+UPDATE ride_statuses s
+       JOIN rides r ON r.id = s.ride_id
+       JOIN chairs c ON c.id = r.chair_id
+SET s.app_sent_at      = CURRENT_TIMESTAMP(6),
+    c.completed_rides  = c.completed_rides + 1,
+    c.total_evaluation = c.total_evaluation + IFNULL(r.evaluation, 0)
+WHERE s.id = ? AND s.app_sent_at IS NULL`
+		}
+		if _, err := db.ExecContext(ctx, query, yetSentRideStatus.ID); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}

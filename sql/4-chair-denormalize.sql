@@ -57,8 +57,8 @@ UPDATE rides r
 SET r.latest_status = l.status,
     r.updated_at    = r.updated_at;
 
--- 椅子の統計は通知のたびに集計していた。評価を受け付けた時点で加算する形に移す。
--- 完走の判定は元の集計と同じで、ARRIVED / CARRYING / COMPLETED の 3 つが揃うこと。
+-- 椅子の統計は通知のたびに集計していた。ユーザーに COMPLETED を通知した時点で加算する形に移す。
+-- 完走の判定は元の集計と同じで、ARRIVED / CARRYING / 通知済み COMPLETED の 3 つが揃うこと。
 -- 対象ライドに evaluation が NULL のものは無いため、合計 ÷ 件数は AVG と一致する。
 UPDATE chairs c
   JOIN (SELECT chair_id, COUNT(*) AS cnt, SUM(evaluation) AS total
@@ -69,7 +69,7 @@ UPDATE chairs c
               GROUP BY r.chair_id, r.id, r.evaluation
               HAVING SUM(s.status = 'ARRIVED') > 0
                  AND SUM(s.status = 'CARRYING') > 0
-                 AND SUM(s.status = 'COMPLETED') > 0) q
+                 AND SUM(s.status = 'COMPLETED' AND s.app_sent_at IS NOT NULL) > 0) q
         GROUP BY chair_id) t ON t.chair_id = c.id
 SET c.completed_rides  = t.cnt,
     c.total_evaluation = t.total;
