@@ -118,15 +118,7 @@ WHERE id = ?`,
 		return
 	}
 
-	// 担当ライドが無い椅子は状態遷移も起こらないので、ライドを引く必要がない。
-	// 認証で読んだ行をそのまま使えるため追加のクエリは発生しない。
 	ride := &Ride{}
-	if chair.PendingRides == 0 {
-		writeJSON(w, http.StatusOK, &chairPostCoordinateResponse{
-			RecordedAt: recordedAt.UnixMilli(),
-		})
-		return
-	}
 	if err := db.GetContext(ctx, ride, `SELECT * FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusInternalServerError, err)
@@ -166,12 +158,6 @@ type chairGetNotificationResponse struct {
 	RetryAfterMs int                               `json:"retry_after_ms"`
 }
 
-type chairNotificationRide struct {
-	Ride
-	UserFirstname string `db:"user_firstname"`
-	UserLastname  string `db:"user_lastname"`
-}
-
 type chairGetNotificationResponseData struct {
 	RideID                string     `json:"ride_id"`
 	User                  simpleUser `json:"user"`
@@ -184,18 +170,11 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	chair := ctx.Value("chair").(*Chair)
 
-	ride := &chairNotificationRide{}
+	ride := &Ride{}
 	yetSentRideStatus := RideStatus{}
 	status := ""
 
-	// 利用者の氏名しか要らないので、ライドと同時に取る
-	if err := db.GetContext(ctx, ride, `
-SELECT rides.*, users.firstname AS user_firstname, users.lastname AS user_lastname
-FROM rides
-       JOIN users ON users.id = rides.user_id
-WHERE rides.chair_id = ?
-ORDER BY rides.updated_at DESC
-LIMIT 1`, chair.ID); err != nil {
+	if err := db.GetContext(ctx, ride, `SELECT * FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeJSON(w, http.StatusOK, &chairGetNotificationResponse{
 				RetryAfterMs: notificationRetryAfterMs,
@@ -217,6 +196,12 @@ LIMIT 1`, chair.ID); err != nil {
 		status = yetSentRideStatus.Status
 	}
 
+	user := &User{}
+	if err := db.GetContext(ctx, user, "SELECT * FROM users WHERE id = ?", ride.UserID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
 	if yetSentRideStatus.ID != "" {
 		if _, err := db.ExecContext(ctx, `UPDATE ride_statuses SET chair_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ?`, yetSentRideStatus.ID); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -235,8 +220,8 @@ LIMIT 1`, chair.ID); err != nil {
 		Data: &chairGetNotificationResponseData{
 			RideID: ride.ID,
 			User: simpleUser{
-				ID:   ride.UserID,
-				Name: fmt.Sprintf("%s %s", ride.UserFirstname, ride.UserLastname),
+				ID:   user.ID,
+				Name: fmt.Sprintf("%s %s", user.Firstname, user.Lastname),
 			},
 			PickupCoordinate: Coordinate{
 				Latitude:  ride.PickupLatitude,
