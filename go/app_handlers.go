@@ -710,7 +710,7 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		stats, err := getChairStats(ctx, db, chair.ID)
+		stats, err := getChairStats(ctx, db, chair.ID, ride.ID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -736,7 +736,10 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 
 // ARRIVED / CARRYING / COMPLETED が揃ったライドだけを完走扱いにする。
 // COMPLETED があっても他が欠けている行が実データに存在するため、3 つとも確認する。
-func getChairStats(ctx context.Context, tx executableGet, chairID string) (appGetNotificationResponseChairStats, error) {
+//
+// 通知中のライド (excludeRideID) 自身は数えない。ベンチマーカーはこの統計を
+// 「そのライドより前に完了した回数」として検証しており、含めると常に 1 多くなる。
+func getChairStats(ctx context.Context, tx executableGet, chairID, excludeRideID string) (appGetNotificationResponseChairStats, error) {
 	stats := appGetNotificationResponseChairStats{}
 
 	if err := tx.GetContext(ctx, &stats, `
@@ -744,11 +747,11 @@ SELECT COUNT(*) AS total_rides_count, IFNULL(AVG(evaluation), 0) AS total_evalua
 FROM (SELECT rides.id, rides.evaluation
       FROM rides
              JOIN ride_statuses ON ride_statuses.ride_id = rides.id
-      WHERE rides.chair_id = ?
+      WHERE rides.chair_id = ? AND rides.id <> ?
       GROUP BY rides.id, rides.evaluation
       HAVING SUM(ride_statuses.status = 'ARRIVED') > 0
          AND SUM(ride_statuses.status = 'CARRYING') > 0
-         AND SUM(ride_statuses.status = 'COMPLETED') > 0) completed`, chairID); err != nil {
+         AND SUM(ride_statuses.status = 'COMPLETED') > 0) completed`, chairID, excludeRideID); err != nil {
 		return stats, err
 	}
 
