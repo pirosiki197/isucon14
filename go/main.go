@@ -43,6 +43,21 @@ func main() {
 		}
 	}()
 
+	// nginx との間は unix ドメインソケットを使う。TCP は matcher が curl で叩くために残す。
+	if path := os.Getenv("ISUCON_UNIX_SOCKET"); path != "" {
+		ln, err := listenUnix(path)
+		if err != nil {
+			slog.Error("failed to listen on unix socket", "path", path, "error", err)
+		} else {
+			go func() {
+				slog.Info("Listening on unix socket", "path", path)
+				if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+					slog.Error("failed to serve on unix socket", "error", err)
+				}
+			}()
+		}
+	}
+
 	// systemd の ExecStop が kill -s QUIT を送る。捕まえないと Go の既定動作で
 	// スタックダンプを吐いて status 2 で即死し、Restart=on-failure のループになる。
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
@@ -58,6 +73,23 @@ func main() {
 	if err := shutdownOTel(shutdownCtx); err != nil {
 		slog.Error("failed to shutdown OpenTelemetry", "error", err)
 	}
+}
+
+// 前回終了時のソケットファイルが残っていると bind に失敗するので消してから作る。
+// nginx は www-data で動くため、誰でも接続できるパーミッションにする。
+func listenUnix(path string) (net.Listener, error) {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, 0o777); err != nil {
+		ln.Close()
+		return nil, err
+	}
+	return ln, nil
 }
 
 func setup() http.Handler {
