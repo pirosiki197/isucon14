@@ -12,10 +12,6 @@ const (
 	matchingAgingWeight = 2.0
 	// 座標を一度も報告していない椅子のコスト。他に候補が無いときだけ選ばれるようにする。
 	matchingUnknownLocationCost = 1000.0
-	// 速い椅子を使うことへの機会費用。速い椅子は全体の 3 割弱しかない希少資源なので、
-	// 短距離ライドでは所要時間の差が小さく、この項が勝って遅い椅子が選ばれる。
-	// 長距離ライドでは所要時間の差がこれを上回るため、速い椅子が選ばれる。
-	matchingSpeedPenalty = -3.0
 )
 
 // 呼び出しが重なっても同じ椅子を二重に割り当てないようにする
@@ -109,8 +105,7 @@ func assignRides(rides []Ride, chairs []matchingChair, now time.Time) []matching
 					*chairs[j].Latitude, *chairs[j].Longitude,
 					rides[i].PickupLatitude, rides[i].PickupLongitude,
 				)
-				cost = float64(pickupDistance+rideDistance)/float64(chairs[j].Speed) +
-					matchingSpeedPenalty*float64(chairs[j].Speed)
+				cost = float64(pickupDistance+rideDistance) / float64(chairs[j].Speed)
 			}
 			pairs = append(pairs, matchingPair{rideIndex: i, chairIndex: j, cost: cost - aging})
 		}
