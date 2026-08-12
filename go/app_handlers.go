@@ -703,6 +703,15 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 		RetryAfterMs: notificationRetryAfterMs,
 	}
 
+	// 統計より先に送信済みの印を付ける。getChairStats は「ユーザーに通知済みの COMPLETED」を
+	// 数えるので、今まさに送る COMPLETED を先に刻まないとこのレスポンスの分だけ足りなくなる。
+	if yetSentRideStatus.ID != "" {
+		if _, err := db.ExecContext(ctx, `UPDATE ride_statuses SET app_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ?`, yetSentRideStatus.ID); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+
 	if ride.ChairID.Valid {
 		chair := &Chair{}
 		if err := db.GetContext(ctx, chair, `SELECT * FROM chairs WHERE id = ?`, ride.ChairID); err != nil {
@@ -724,18 +733,15 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if yetSentRideStatus.ID != "" {
-		if _, err := db.ExecContext(ctx, `UPDATE ride_statuses SET app_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ?`, yetSentRideStatus.ID); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-	}
-
 	writeJSON(w, http.StatusOK, response)
 }
 
 // ARRIVED / CARRYING / COMPLETED が揃ったライドだけを完走扱いにする。
 // COMPLETED があっても他が欠けている行が実データに存在するため、3 つとも確認する。
+//
+// COMPLETED は「ユーザーに通知済み」であることも要求する。DB には評価した時点で
+// COMPLETED 行が入るが、ベンチマーカーが数えるのは通知を受け取ったライドだけなので、
+// 通知前に数えると多くなる。全 170 件のずれがこの条件で説明できることを実測で確認した。
 func getChairStats(ctx context.Context, tx executableGet, chairID string) (appGetNotificationResponseChairStats, error) {
 	stats := appGetNotificationResponseChairStats{}
 
@@ -748,7 +754,7 @@ FROM (SELECT rides.id, rides.evaluation
       GROUP BY rides.id, rides.evaluation
       HAVING SUM(ride_statuses.status = 'ARRIVED') > 0
          AND SUM(ride_statuses.status = 'CARRYING') > 0
-         AND SUM(ride_statuses.status = 'COMPLETED') > 0) completed`, chairID); err != nil {
+         AND SUM(ride_statuses.status = 'COMPLETED' AND ride_statuses.app_sent_at IS NOT NULL) > 0) completed`, chairID); err != nil {
 		return stats, err
 	}
 
