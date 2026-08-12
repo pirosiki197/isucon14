@@ -33,12 +33,23 @@ func (c *authCache[T]) reset() {
 	c.mu.Unlock()
 }
 
+// chairs は座標やカウンタが走行中に変わり続けるため、行ごとキャッシュしてはいけない。
+// 変化しないカラムだけを別の型に切り出して、可変な値を取り違えられないようにする。
+type chairIdentity struct {
+	ID      string `db:"id"`
+	OwnerID string `db:"owner_id"`
+	Name    string `db:"name"`
+	Model   string `db:"model"`
+}
+
 var (
 	userCache  = newAuthCache[User]()
 	ownerCache = newAuthCache[Owner]()
+	chairCache = newAuthCache[chairIdentity]()
 )
 
 func resetCaches() {
 	userCache.reset()
 	ownerCache.reset()
+	chairCache.reset()
 }

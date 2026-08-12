@@ -74,7 +74,7 @@ type postChairActivityRequest struct {
 
 func chairPostActivity(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	chair := ctx.Value("chair").(*Chair)
+	chair := ctx.Value("chair").(*chairIdentity)
 
 	req := &postChairActivityRequest{}
 	if err := bindJSON(r, req); err != nil {
@@ -103,7 +103,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	chair := ctx.Value("chair").(*Chair)
+	chair := ctx.Value("chair").(*chairIdentity)
 
 	// 履歴を残さず chairs 側に畳み込む。前回座標が無い初回は距離を加算しない。
 	recordedAt := time.Now()
@@ -119,9 +119,15 @@ WHERE id = ?`,
 	}
 
 	// 担当ライドが無い椅子は状態遷移も起こらないので、ライドを引く必要がない。
-	// 認証で読んだ行をそのまま使えるため追加のクエリは発生しない。
+	// pending_rides は走行中に変化するためキャッシュできず、ここで読む。
+	var pendingRides int
+	if err := db.GetContext(ctx, &pendingRides, `SELECT pending_rides FROM chairs WHERE id = ?`, chair.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
 	ride := &Ride{}
-	if chair.PendingRides == 0 {
+	if pendingRides == 0 {
 		writeJSON(w, http.StatusOK, &chairPostCoordinateResponse{
 			RecordedAt: recordedAt.UnixMilli(),
 		})
@@ -182,7 +188,7 @@ type chairGetNotificationResponseData struct {
 
 func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	chair := ctx.Value("chair").(*Chair)
+	chair := ctx.Value("chair").(*chairIdentity)
 
 	ride := &chairNotificationRide{}
 	yetSentRideStatus := RideStatus{}
@@ -260,7 +266,7 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	rideID := r.PathValue("ride_id")
 
-	chair := ctx.Value("chair").(*Chair)
+	chair := ctx.Value("chair").(*chairIdentity)
 
 	req := &postChairRidesRideIDStatusRequest{}
 	if err := bindJSON(r, req); err != nil {
