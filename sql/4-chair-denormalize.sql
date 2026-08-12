@@ -3,6 +3,15 @@ SET CHARACTER_SET_CONNECTION = utf8mb4;
 
 USE isuride;
 
+-- chair_locations の履歴を毎回集計せずに済ませるための非正規化。
+-- 3-initial-data.sql の INSERT はカラム名を省略しているため、1-schema.sql で列を足すと
+-- 値の数が合わずに投入が失敗する。そのため列の追加はデータ投入後のここで行う。
+ALTER TABLE chairs
+  ADD COLUMN latitude            INTEGER     NULL COMMENT '最新の緯度',
+  ADD COLUMN longitude           INTEGER     NULL COMMENT '最新の経度',
+  ADD COLUMN total_distance      INTEGER     NOT NULL DEFAULT 0 COMMENT '総移動距離',
+  ADD COLUMN location_updated_at DATETIME(6) NULL COMMENT '座標の最終更新日時';
+
 -- アプリは座標を受け取るたびに chairs 側を更新するが、初期データは chair_locations に
 -- しか入っていない。ここで履歴を畳んで chairs に移しておく。
 

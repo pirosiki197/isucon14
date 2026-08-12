@@ -32,12 +32,6 @@ CREATE TABLE chairs
   access_token VARCHAR(255) NOT NULL COMMENT 'アクセストークン',
   created_at   DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT '登録日時',
   updated_at   DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT '更新日時',
-  -- chair_locations の履歴を毎回集計せずに済ませるための非正規化。
-  -- 座標を受け取るたびに更新する。初期データからの復元は 4-chair-denormalize.sql。
-  latitude            INTEGER     NULL COMMENT '最新の緯度',
-  longitude           INTEGER     NULL COMMENT '最新の経度',
-  total_distance      INTEGER     NOT NULL DEFAULT 0 COMMENT '総移動距離',
-  location_updated_at DATETIME(6) NULL COMMENT '座標の最終更新日時',
   PRIMARY KEY (id)
 )
   COMMENT = '椅子情報テーブル';
