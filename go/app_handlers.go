@@ -629,6 +629,11 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// クライアントに返すポーリング間隔。長くするほどリクエスト数が減って CPU が浮くが、
+// ライドは 6 段階の状態遷移を通知経由で進むため、その分だけ進行が遅れる。
+// アプリが速くなるほど短くする余地が出るので、計測しながら調整する値。
+const notificationRetryAfterMs = 100
+
 type appGetNotificationResponse struct {
 	Data         *appGetNotificationResponseData `json:"data"`
 	RetryAfterMs int                             `json:"retry_after_ms"`
@@ -665,7 +670,7 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 	if err := db.GetContext(ctx, ride, `SELECT * FROM rides WHERE user_id = ? ORDER BY created_at DESC LIMIT 1`, user.ID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeJSON(w, http.StatusOK, &appGetNotificationResponse{
-				RetryAfterMs: 30,
+				RetryAfterMs: notificationRetryAfterMs,
 			})
 			return
 		}
@@ -713,7 +718,7 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 			CreatedAt: ride.CreatedAt.UnixMilli(),
 			UpdateAt:  ride.UpdatedAt.UnixMilli(),
 		},
-		RetryAfterMs: 30,
+		RetryAfterMs: notificationRetryAfterMs,
 	}
 
 	if ride.ChairID.Valid {
