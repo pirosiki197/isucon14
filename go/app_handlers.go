@@ -710,7 +710,7 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		stats, err := getChairStats(ctx, db, chair.ID, ride.ID)
+		stats, err := getChairStats(ctx, db, chair.ID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -737,9 +737,10 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 // ARRIVED / CARRYING / COMPLETED が揃ったライドだけを完走扱いにする。
 // COMPLETED があっても他が欠けている行が実データに存在するため、3 つとも確認する。
 //
-// 通知中のライド (excludeRideID) 自身は数えない。ベンチマーカーはこの統計を
-// 「そのライドより前に完了した回数」として検証しており、含めると常に 1 多くなる。
-func getChairStats(ctx context.Context, tx executableGet, chairID, excludeRideID string) (appGetNotificationResponseChairStats, error) {
+// COMPLETED は「ユーザーに通知済み」であることも要求する。DB には評価した時点で
+// COMPLETED 行が入るが、ユーザーに届くのは次のポーリングなので、通知前に数えると
+// ベンチマーカーの数え方より 1 多くなる。
+func getChairStats(ctx context.Context, tx executableGet, chairID string) (appGetNotificationResponseChairStats, error) {
 	stats := appGetNotificationResponseChairStats{}
 
 	if err := tx.GetContext(ctx, &stats, `
@@ -747,11 +748,11 @@ SELECT COUNT(*) AS total_rides_count, IFNULL(AVG(evaluation), 0) AS total_evalua
 FROM (SELECT rides.id, rides.evaluation
       FROM rides
              JOIN ride_statuses ON ride_statuses.ride_id = rides.id
-      WHERE rides.chair_id = ? AND rides.id <> ?
+      WHERE rides.chair_id = ?
       GROUP BY rides.id, rides.evaluation
       HAVING SUM(ride_statuses.status = 'ARRIVED') > 0
          AND SUM(ride_statuses.status = 'CARRYING') > 0
-         AND SUM(ride_statuses.status = 'COMPLETED') > 0) completed`, chairID, excludeRideID); err != nil {
+         AND SUM(ride_statuses.status = 'COMPLETED' AND ride_statuses.app_sent_at IS NOT NULL) > 0) completed`, chairID); err != nil {
 		return stats, err
 	}
 
