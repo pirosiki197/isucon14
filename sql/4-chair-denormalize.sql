@@ -10,7 +10,9 @@ ALTER TABLE chairs
   ADD COLUMN latitude            INTEGER     NULL COMMENT '最新の緯度',
   ADD COLUMN longitude           INTEGER     NULL COMMENT '最新の経度',
   ADD COLUMN total_distance      INTEGER     NOT NULL DEFAULT 0 COMMENT '総移動距離',
-  ADD COLUMN location_updated_at DATETIME(6) NULL COMMENT '座標の最終更新日時';
+  ADD COLUMN location_updated_at DATETIME(6) NULL COMMENT '座標の最終更新日時',
+  ADD COLUMN pending_rides       INTEGER     NOT NULL DEFAULT 0 COMMENT '椅子への通知が終わっていないライド数',
+  ADD INDEX idx_is_active_pending_rides (is_active, pending_rides);
 
 -- アプリは座標を受け取るたびに chairs 側を更新するが、初期データは chair_locations に
 -- しか入っていない。ここで履歴を畳んで chairs に移しておく。
@@ -34,3 +36,13 @@ UPDATE chairs c
     ON m.chair_id = l.chair_id AND m.mx = l.created_at
 SET c.latitude  = l.latitude,
     c.longitude = l.longitude;
+
+-- マッチングは「担当ライド全ての 6 状態を椅子へ通知し終えた椅子」だけを空きとみなす。
+-- その判定を毎回集計せずに済ませるため、未通知のライド数を数えて持たせる。
+UPDATE chairs c
+  JOIN (SELECT r.chair_id, COUNT(*) AS cnt
+        FROM rides r
+        WHERE r.chair_id IS NOT NULL
+          AND (SELECT COUNT(s.chair_sent_at) FROM ride_statuses s WHERE s.ride_id = r.id) <> 6
+        GROUP BY r.chair_id) p ON p.chair_id = c.id
+SET c.pending_rides = p.cnt;

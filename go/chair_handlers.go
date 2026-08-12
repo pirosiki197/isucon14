@@ -216,6 +216,13 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		// COMPLETED は 6 状態の最後なので、これを送り終えた時点で椅子が空く
+		if yetSentRideStatus.Status == "COMPLETED" {
+			if _, err := db.ExecContext(ctx, `UPDATE chairs SET pending_rides = pending_rides - 1 WHERE id = ?`, chair.ID); err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, &chairGetNotificationResponse{
