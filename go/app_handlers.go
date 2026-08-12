@@ -736,10 +736,6 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 
 // ARRIVED / CARRYING / COMPLETED が揃ったライドだけを完走扱いにする。
 // COMPLETED があっても他が欠けている行が実データに存在するため、3 つとも確認する。
-//
-// COMPLETED は「ユーザーに通知済み」であることも要求する。DB には評価した時点で
-// COMPLETED 行が入るが、ユーザーに届くのは次のポーリングなので、通知前に数えると
-// ベンチマーカーの数え方より 1 多くなる。
 func getChairStats(ctx context.Context, tx executableGet, chairID string) (appGetNotificationResponseChairStats, error) {
 	stats := appGetNotificationResponseChairStats{}
 
@@ -752,7 +748,7 @@ FROM (SELECT rides.id, rides.evaluation
       GROUP BY rides.id, rides.evaluation
       HAVING SUM(ride_statuses.status = 'ARRIVED') > 0
          AND SUM(ride_statuses.status = 'CARRYING') > 0
-         AND SUM(ride_statuses.status = 'COMPLETED' AND ride_statuses.app_sent_at IS NOT NULL) > 0) completed`, chairID); err != nil {
+         AND SUM(ride_statuses.status = 'COMPLETED') > 0) completed`, chairID); err != nil {
 		return stats, err
 	}
 
