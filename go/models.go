@@ -19,6 +19,8 @@ type Chair struct {
 	TotalDistance     int        `db:"total_distance"`
 	LocationUpdatedAt *time.Time `db:"location_updated_at"`
 	PendingRides      int        `db:"pending_rides"`
+	CompletedRides    int        `db:"completed_rides"`
+	TotalEvaluation   int        `db:"total_evaluation"`
 }
 
 type ChairModel struct {

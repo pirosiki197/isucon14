@@ -703,12 +703,20 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 		RetryAfterMs: notificationRetryAfterMs,
 	}
 
-	// 統計より先に送信済みの印を付ける。getChairStats は「ユーザーに通知済みの COMPLETED」を
-	// 数えるので、今まさに送る COMPLETED を先に刻まないとこのレスポンスの分だけ足りなくなる。
 	if yetSentRideStatus.ID != "" {
 		if _, err := db.ExecContext(ctx, `UPDATE ride_statuses SET app_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ?`, yetSentRideStatus.ID); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
+		}
+		// ベンチマーカーは受け取った通知でしか完了を数えないので、統計の加算もこの時点で行う。
+		// 下の統計読み出しより先に加算しないと、このレスポンスの分だけ足りなくなる。
+		if yetSentRideStatus.Status == "COMPLETED" && ride.ChairID.Valid && ride.Evaluation != nil {
+			if _, err := db.ExecContext(ctx, `
+UPDATE chairs SET completed_rides = completed_rides + 1, total_evaluation = total_evaluation + ?
+WHERE id = ?`, *ride.Evaluation, ride.ChairID.String); err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
 		}
 	}
 
@@ -719,10 +727,9 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		stats, err := getChairStats(ctx, db, chair.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
+		stats := appGetNotificationResponseChairStats{TotalRidesCount: chair.CompletedRides}
+		if chair.CompletedRides > 0 {
+			stats.TotalEvaluationAvg = float64(chair.TotalEvaluation) / float64(chair.CompletedRides)
 		}
 
 		response.Data.Chair = &appGetNotificationResponseChair{
@@ -734,31 +741,6 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, response)
-}
-
-// ARRIVED / CARRYING / COMPLETED が揃ったライドだけを完走扱いにする。
-// COMPLETED があっても他が欠けている行が実データに存在するため、3 つとも確認する。
-//
-// COMPLETED は「ユーザーに通知済み」であることも要求する。DB には評価した時点で
-// COMPLETED 行が入るが、ベンチマーカーが数えるのは通知を受け取ったライドだけなので、
-// 通知前に数えると多くなる。全 170 件のずれがこの条件で説明できることを実測で確認した。
-func getChairStats(ctx context.Context, tx executableGet, chairID string) (appGetNotificationResponseChairStats, error) {
-	stats := appGetNotificationResponseChairStats{}
-
-	if err := tx.GetContext(ctx, &stats, `
-SELECT COUNT(*) AS total_rides_count, IFNULL(AVG(evaluation), 0) AS total_evaluation_avg
-FROM (SELECT rides.id, rides.evaluation
-      FROM rides
-             JOIN ride_statuses ON ride_statuses.ride_id = rides.id
-      WHERE rides.chair_id = ?
-      GROUP BY rides.id, rides.evaluation
-      HAVING SUM(ride_statuses.status = 'ARRIVED') > 0
-         AND SUM(ride_statuses.status = 'CARRYING') > 0
-         AND SUM(ride_statuses.status = 'COMPLETED' AND ride_statuses.app_sent_at IS NOT NULL) > 0) completed`, chairID); err != nil {
-		return stats, err
-	}
-
-	return stats, nil
 }
 
 type appGetNearbyChairsResponse struct {
