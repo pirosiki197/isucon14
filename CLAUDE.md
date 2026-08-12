@@ -56,6 +56,10 @@ API 仕様は `openapi.yaml`、フロントエンドのビルド済み成果物�
 - `internal_handlers.go` の椅子選択は `ORDER BY RAND()`。
 - スキーマや初期化フローを変える場合、`sql/1-schema.sql`(DDL)と `sql/3-initial-data.sql.gz`(初期データ、gzip)の整合に注意する。ベンチマーカーは `POST /api/initialize` 経由で毎回 `sql/init.sh` を走らせる。
 
+## 大会をまたいで使える知見
+
+`docs/learnings/` に、この問題固有ではない知見をまとめてある。計測の順序、インデックスの当て方、MySQL の fsync 設定、Go 側の定石、進め方。新しく効いた手や踏んだ罠はここに追記する。
+
 ## サーバーでの計測と運用
 
 競技サーバーは `ssh isucon@54.249.96.239`(内部 IP `172.31.33.90`)。`sudo` は NOPASSWD。2 vCPU / 3.8GB なので、計測エージェント自体の負荷も無視できない。ベンチマーカーは別インスタンス `13.231.124.9`(内部 IP `172.31.38.72`)にある。
