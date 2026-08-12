@@ -91,6 +91,8 @@ func setup() http.Handler {
 	dbConfig.Net = "tcp"
 	dbConfig.DBName = dbname
 	dbConfig.ParseTime = true
+	// プレースホルダをクライアント側で展開し、クエリごとの PREPARE 往復を省く
+	dbConfig.InterpolateParams = true
 
 	sqlDB, err := otelsql.Open("mysql", dbConfig.FormatDSN(),
 		otelsql.WithAttributes(
