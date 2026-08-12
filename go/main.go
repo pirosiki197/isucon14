@@ -43,7 +43,9 @@ func main() {
 		}
 	}()
 
-	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	// systemd の ExecStop が kill -s QUIT を送る。捕まえないと Go の既定動作で
+	// スタックダンプを吐いて status 2 で即死し、Restart=on-failure のループになる。
+	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
 	<-sigCtx.Done()
 	stop()
 
