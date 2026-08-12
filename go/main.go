@@ -112,6 +112,11 @@ func setup() http.Handler {
 		panic(err)
 	}
 	db = sqlx.NewDb(sqlDB, "mysql")
+	// MaxIdleConns の既定値は 2 で、トランザクションを使わない読み取りだと
+	// クエリのたびに接続を張り直してしまう。MySQL の max_connections は 151。
+	db.SetMaxOpenConns(100)
+	db.SetMaxIdleConns(100)
+	db.SetConnMaxLifetime(0)
 	if err := db.Ping(); err != nil {
 		panic(err)
 	}
