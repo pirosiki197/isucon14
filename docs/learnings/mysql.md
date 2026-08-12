@@ -91,6 +91,44 @@ mysql < 3-initial-data.sql      # カラム名省略の INSERT
 mysql < 4-denormalize.sql       # ここで ALTER TABLE ADD COLUMN
 ```
 
+### バックフィルで updated_at を壊さない
+
+`ON UPDATE CURRENT_TIMESTAMP` が付いた列は、**関係ない列を UPDATE しただけで書き換わる**。
+初期データの `updated_at` を期間絞り込みに使っているクエリがあると、
+バックフィル一発で売上集計などが壊れる。
+
+**自分自身を明示的に代入すると自動更新が抑止される。**
+
+```sql
+UPDATE rides r JOIN ... 
+SET r.latest_status = l.status,
+    r.updated_at    = r.updated_at;   -- これで ON UPDATE が発火しない
+```
+
+確認は簡単で、バックフィル後に `SELECT MIN(updated_at), MAX(updated_at)` を見る。
+初期データの日付のままなら成功、実行日時になっていたら壊している。
+
+## 複数テーブルをまとめて更新して隙間を消す
+
+フラグとカウンタのように**同時に進まないと矛盾する 2 つの値**を別々の文で更新すると、
+その隙間を読んだリクエストが矛盾した値を返す。今回これで検証エラーを 132 件出した。
+
+MySQL の複数テーブル UPDATE で 1 文にまとめれば、隙間は原理的に消える。
+
+```sql
+UPDATE ride_statuses s
+       JOIN rides r  ON r.id = s.ride_id
+       JOIN chairs c ON c.id = r.chair_id
+SET s.app_sent_at      = CURRENT_TIMESTAMP(6),
+    c.completed_rides  = c.completed_rides + 1,
+    c.total_evaluation = c.total_evaluation + IFNULL(r.evaluation, 0)
+WHERE s.id = ? AND s.app_sent_at IS NULL
+```
+
+`WHERE ... IS NULL` を付けておくと、**同時に 2 リクエストが来ても二重に数えない**
+（更新できた側だけがカウントを進める）。トランザクションを張るより軽く、
+「どちらを先に更新するか」を悩む必要もなくなる。
+
 ## 非正規化
 
 「読むたびに集計」を「書くたびに更新」へ移す。
