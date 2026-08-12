@@ -557,6 +557,17 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 椅子の統計はここで加算する。通知の送信時点で加算すると、評価から通知が届くまでの
+	// 間に統計を読んだリクエストが 1 少ない値を返す。
+	if ride.ChairID.Valid {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE chairs SET completed_rides = completed_rides + 1, total_evaluation = total_evaluation + ?
+WHERE id = ?`, req.Evaluation, ride.ChairID.String); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+
 	if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE id = ?`, rideID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, errors.New("ride not found"))
@@ -707,16 +718,6 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 		if _, err := db.ExecContext(ctx, `UPDATE ride_statuses SET app_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ?`, yetSentRideStatus.ID); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
-		}
-		// ベンチマーカーは受け取った通知でしか完了を数えないので、統計の加算もこの時点で行う。
-		// 下の統計読み出しより先に加算しないと、このレスポンスの分だけ足りなくなる。
-		if yetSentRideStatus.Status == "COMPLETED" && ride.ChairID.Valid && ride.Evaluation != nil {
-			if _, err := db.ExecContext(ctx, `
-UPDATE chairs SET completed_rides = completed_rides + 1, total_evaluation = total_evaluation + ?
-WHERE id = ?`, *ride.Evaluation, ride.ChairID.String); err != nil {
-				writeError(w, http.StatusInternalServerError, err)
-				return
-			}
 		}
 	}
 
