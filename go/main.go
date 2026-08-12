@@ -191,6 +191,10 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// init.sh が DB を作り直すので、前回走行の行を捨てる。
+	// init.sh の実行中に引き当てられた行も無効なため、実行後に捨てる。
+	resetCaches()
+
 	if _, err := db.ExecContext(ctx, "UPDATE settings SET value = ? WHERE name = 'payment_gateway_url'", req.PaymentServer); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
