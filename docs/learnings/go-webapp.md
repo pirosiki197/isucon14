@@ -151,11 +151,28 @@ type chairIdentity struct {
 SELECT SUM(c.completed_rides <> IFNULL(o.cnt, 0)) AS drift FROM chairs c LEFT JOIN (...) o ...
 ```
 
-## graceful shutdown とシグナル
+## SIGQUIT を捕まえる（最初にやる）
 
-systemd の `ExecStop` が `kill -s QUIT` を送る構成があり、
-Go はデフォルトで **SIGQUIT を受けるとスタックダンプを吐いて即死する**。
-`signal.NotifyContext` で `SIGINT`/`SIGTERM` だけ捕捉していても機能しないので、
-`syscall.SIGQUIT` も含める。
+ISUCON の unit は `ExecStop=/bin/kill -s QUIT $MAINPID` になっていることがある。
+Go は **SIGQUIT を受けると全ゴルーチンのスタックを吐いて status 2 で即死**するので、
+`signal.NotifyContext` で `SIGINT`/`SIGTERM` だけ捕まえていても機能しない。
 
-OpenTelemetry などで終了時にフラッシュしたいものがあると、これを取りこぼす。
+```go
+signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
+```
+
+**厄介なのは、`Restart=on-failure` がこれを隠すこと。** 今回、
+**一日中デプロイのたびに死んで復活していたのに症状が出なかった**。
+リトライ上限に達した回だけサービスが `failed` のまま止まり、
+`POST /api/initialize` が nginx の 502 になって初めて露見した。
+
+デプロイの直後に確認する癖をつけると早く気付ける。
+
+```bash
+sudo systemctl restart isuride-go && sleep 2 && \
+  sudo journalctl -u isuride-go --since '1 min ago' | grep -c SIGQUIT
+```
+
+この項目は序盤に気付いていたのに「オプション」として後回しにした。
+**放置した既知の問題は、無関係な作業中に別の症状として出てくる。**
+1 行で直るものは見つけた時点で直す。
