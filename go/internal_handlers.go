@@ -22,7 +22,7 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 
 	matched := &Chair{}
 	empty := false
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		if err := db.GetContext(ctx, matched, "SELECT * FROM chairs INNER JOIN (SELECT id FROM chairs WHERE is_active = TRUE ORDER BY RAND() LIMIT 1) AS tmp ON chairs.id = tmp.id LIMIT 1"); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				w.WriteHeader(http.StatusNoContent)

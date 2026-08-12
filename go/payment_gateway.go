@@ -8,9 +8,15 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 var erroredUpstream = errors.New("errored upstream")
+
+var paymentGatewayClient = &http.Client{
+	Transport: otelhttp.NewTransport(http.DefaultTransport),
+}
 
 type paymentGatewayPostPaymentRequest struct {
 	Amount int `json:"amount"`
@@ -39,7 +45,7 @@ func requestPaymentGatewayPostPayment(ctx context.Context, paymentGatewayURL str
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Authorization", "Bearer "+token)
 
-			res, err := http.DefaultClient.Do(req)
+			res, err := paymentGatewayClient.Do(req)
 			if err != nil {
 				return err
 			}
@@ -53,7 +59,7 @@ func requestPaymentGatewayPostPayment(ctx context.Context, paymentGatewayURL str
 				}
 				getReq.Header.Set("Authorization", "Bearer "+token)
 
-				getRes, err := http.DefaultClient.Do(getReq)
+				getRes, err := paymentGatewayClient.Do(getReq)
 				if err != nil {
 					return err
 				}

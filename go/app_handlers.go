@@ -279,8 +279,8 @@ type appPostRidesResponse struct {
 }
 
 type executableGet interface {
-	Get(dest interface{}, query string, args ...interface{}) error
-	GetContext(ctx context.Context, dest interface{}, query string, args ...interface{}) error
+	Get(dest any, query string, args ...any) error
+	GetContext(ctx context.Context, dest any, query string, args ...any) error
 }
 
 func getLatestRideStatus(ctx context.Context, tx executableGet, rideID string) (string, error) {
@@ -791,9 +791,10 @@ func getChairStats(ctx context.Context, tx *sqlx.Tx, chairID string) (appGetNoti
 		var arrivedAt, pickupedAt *time.Time
 		var isCompleted bool
 		for _, status := range rideStatuses {
-			if status.Status == "ARRIVED" {
+			switch status.Status {
+			case "ARRIVED":
 				arrivedAt = &status.CreatedAt
-			} else if status.Status == "CARRYING" {
+			case "CARRYING":
 				pickupedAt = &status.CreatedAt
 			}
 			if status.Status == "COMPLETED" {

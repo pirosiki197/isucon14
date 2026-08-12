@@ -1,28 +1,61 @@
 package main
 
 import (
+	"context"
 	crand "crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strconv"
+	"syscall"
+	"time"
 
+	"github.com/XSAM/otelsql"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 )
 
 var db *sqlx.DB
 
 func main() {
-	mux := setup()
-	slog.Info("Listening on :8080")
-	http.ListenAndServe(":8080", mux)
+	ctx := context.Background()
+
+	shutdownOTel, err := setupOTel(ctx)
+	if err != nil {
+		slog.Error("failed to set up OpenTelemetry", "error", err)
+	}
+
+	srv := &http.Server{Addr: ":8080", Handler: setup()}
+	go func() {
+		slog.Info("Listening on :8080")
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("failed to serve", "error", err)
+		}
+	}()
+
+	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	<-sigCtx.Done()
+	stop()
+
+	// 終了時に未送信のスパンを吐き出す
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("failed to shutdown server", "error", err)
+	}
+	if err := shutdownOTel(shutdownCtx); err != nil {
+		slog.Error("failed to shutdown OpenTelemetry", "error", err)
+	}
 }
 
 func setup() http.Handler {
@@ -59,13 +92,31 @@ func setup() http.Handler {
 	dbConfig.DBName = dbname
 	dbConfig.ParseTime = true
 
-	_db, err := sqlx.Connect("mysql", dbConfig.FormatDSN())
+	sqlDB, err := otelsql.Open("mysql", dbConfig.FormatDSN(),
+		otelsql.WithAttributes(
+			semconv.DBSystemNameMySQL,
+			semconv.ServerAddress(host),
+			semconv.DBNamespace(dbname),
+		),
+		otelsql.WithSpanOptions(otelsql.SpanOptions{
+			// クエリ単位のスパンだけ残し、コネクション周りのノイズは落とす
+			OmitConnResetSession: true,
+			OmitConnectorConnect: true,
+			OmitRows:             true,
+			DisableErrSkip:       true,
+		}),
+	)
 	if err != nil {
 		panic(err)
 	}
-	db = _db
+	db = sqlx.NewDb(sqlDB, "mysql")
+	if err := db.Ping(); err != nil {
+		panic(err)
+	}
 
 	mux := chi.NewRouter()
+	mux.Use(otelhttp.NewMiddleware(otelServiceName))
+	mux.Use(otelRouteTagMiddleware)
 	mux.Use(middleware.Logger)
 	mux.Use(middleware.Recoverer)
 	mux.HandleFunc("POST /api/initialize", postInitialize)
@@ -146,11 +197,11 @@ type Coordinate struct {
 	Longitude int `json:"longitude"`
 }
 
-func bindJSON(r *http.Request, v interface{}) error {
+func bindJSON(r *http.Request, v any) error {
 	return json.NewDecoder(r.Body).Decode(v)
 }
 
-func writeJSON(w http.ResponseWriter, statusCode int, v interface{}) {
+func writeJSON(w http.ResponseWriter, statusCode int, v any) {
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 	buf, err := json.Marshal(v)
 	if err != nil {
@@ -172,7 +223,7 @@ func writeError(w http.ResponseWriter, statusCode int, err error) {
 	}
 	w.Write(buf)
 
-	slog.Error("error response wrote", err)
+	slog.Error("error response wrote", "error", err)
 }
 
 func secureRandomStr(b int) string {
