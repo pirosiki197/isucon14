@@ -37,6 +37,24 @@ UPDATE chairs c
 SET c.latitude  = l.latitude,
     c.longitude = l.longitude;
 
+-- ride_statuses は追記型で、現在の状態を毎回 ORDER BY created_at DESC LIMIT 1 で求めていた。
+-- rides 側に最新の状態を持たせる。3-initial-data.sql の rides の INSERT もカラム名を
+-- 省略しているため、ここで追加する。
+ALTER TABLE rides
+  ADD COLUMN latest_status ENUM ('MATCHING', 'ENROUTE', 'PICKUP', 'CARRYING', 'ARRIVED', 'COMPLETED')
+    NOT NULL DEFAULT 'MATCHING' COMMENT '最新の状態',
+  ADD INDEX idx_chair_id_latest_status (chair_id, latest_status);
+
+-- updated_at は ON UPDATE CURRENT_TIMESTAMP なので、明示的に元の値を入れて自動更新を抑える。
+-- ownerGetSales が rides.updated_at で期間を絞るため、ここで書き換わると売上が壊れる。
+UPDATE rides r
+  JOIN (SELECT s.ride_id, s.status
+        FROM ride_statuses s
+          JOIN (SELECT ride_id, MAX(created_at) AS mx FROM ride_statuses GROUP BY ride_id) t
+            ON t.ride_id = s.ride_id AND t.mx = s.created_at) l ON l.ride_id = r.id
+SET r.latest_status = l.status,
+    r.updated_at    = r.updated_at;
+
 -- マッチングは「担当ライド全ての 6 状態を椅子へ通知し終えた椅子」だけを空きとみなす。
 -- その判定を毎回集計せずに済ませるため、未通知のライド数を数えて持たせる。
 UPDATE chairs c

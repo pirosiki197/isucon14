@@ -211,12 +211,7 @@ func appGetRides(w http.ResponseWriter, r *http.Request) {
 
 	items := []getAppRidesResponseItem{}
 	for _, ride := range rides {
-		status, err := getLatestRideStatus(ctx, tx, ride.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		if status != "COMPLETED" {
+		if ride.LatestStatus != "COMPLETED" {
 			continue
 		}
 
@@ -282,12 +277,23 @@ type executableGet interface {
 	GetContext(ctx context.Context, dest any, query string, args ...any) error
 }
 
-func getLatestRideStatus(ctx context.Context, tx executableGet, rideID string) (string, error) {
-	status := ""
-	if err := tx.GetContext(ctx, &status, `SELECT status FROM ride_statuses WHERE ride_id = ? ORDER BY created_at DESC LIMIT 1`, rideID); err != nil {
-		return "", err
+type executableExec interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// 通知は ride_statuses の行を 1 件ずつ送るため履歴は残しつつ、現在の状態は rides 側に持たせる。
+// この 2 つは必ず対で更新する。
+func insertRideStatus(ctx context.Context, tx executableExec, rideID, status string) error {
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)`,
+		ulid.Make().String(), rideID, status,
+	); err != nil {
+		return err
 	}
-	return status, nil
+	if _, err := tx.ExecContext(ctx, `UPDATE rides SET latest_status = ? WHERE id = ?`, status, rideID); err != nil {
+		return err
+	}
+	return nil
 }
 
 func appPostRides(w http.ResponseWriter, r *http.Request) {
@@ -320,12 +326,7 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 
 	continuingRideCount := 0
 	for _, ride := range rides {
-		status, err := getLatestRideStatus(ctx, tx, ride.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		if status != "COMPLETED" {
+		if ride.LatestStatus != "COMPLETED" {
 			continuingRideCount++
 		}
 	}
@@ -345,11 +346,7 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := tx.ExecContext(
-		ctx,
-		`INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)`,
-		ulid.Make().String(), rideID, "MATCHING",
-	); err != nil {
+	if err := insertRideStatus(ctx, tx, rideID, "MATCHING"); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -534,13 +531,7 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	status, err := getLatestRideStatus(ctx, tx, ride.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	if status != "ARRIVED" {
+	if ride.LatestStatus != "ARRIVED" {
 		writeError(w, http.StatusBadRequest, errors.New("not arrived yet"))
 		return
 	}
@@ -561,11 +552,7 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = tx.ExecContext(
-		ctx,
-		`INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)`,
-		ulid.Make().String(), rideID, "COMPLETED")
-	if err != nil {
+	if err := insertRideStatus(ctx, tx, rideID, "COMPLETED"); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -682,12 +669,7 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 	status := ""
 	if err := db.GetContext(ctx, &yetSentRideStatus, `SELECT * FROM ride_statuses WHERE ride_id = ? AND app_sent_at IS NULL ORDER BY created_at ASC LIMIT 1`, ride.ID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			var err error
-			status, err = getLatestRideStatus(ctx, db, ride.ID)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, err)
-				return
-			}
+			status = ride.LatestStatus
 		} else {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -832,11 +814,7 @@ FROM chairs c
 WHERE c.is_active = TRUE
   AND c.latitude IS NOT NULL
   AND ABS(c.latitude - ?) + ABS(c.longitude - ?) <= ?
-  AND NOT EXISTS (SELECT 1
-                  FROM rides r
-                  WHERE r.chair_id = c.id
-                    AND (SELECT s.status FROM ride_statuses s
-                         WHERE s.ride_id = r.id ORDER BY s.created_at DESC LIMIT 1) <> 'COMPLETED')
+  AND NOT EXISTS (SELECT 1 FROM rides r WHERE r.chair_id = c.id AND r.latest_status <> 'COMPLETED')
 ORDER BY c.id`, lat, lon, distance); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

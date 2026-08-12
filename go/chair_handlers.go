@@ -125,21 +125,17 @@ WHERE id = ?`,
 			return
 		}
 	} else {
-		status, err := getLatestRideStatus(ctx, db, ride.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
+		status := ride.LatestStatus
 		if status != "COMPLETED" && status != "CANCELED" {
 			if req.Latitude == ride.PickupLatitude && req.Longitude == ride.PickupLongitude && status == "ENROUTE" {
-				if _, err := db.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, "PICKUP"); err != nil {
+				if err := insertRideStatus(ctx, db, ride.ID, "PICKUP"); err != nil {
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
 			}
 
 			if req.Latitude == ride.DestinationLatitude && req.Longitude == ride.DestinationLongitude && status == "CARRYING" {
-				if _, err := db.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, "ARRIVED"); err != nil {
+				if err := insertRideStatus(ctx, db, ride.ID, "ARRIVED"); err != nil {
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
@@ -191,12 +187,7 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 
 	if err := db.GetContext(ctx, &yetSentRideStatus, `SELECT * FROM ride_statuses WHERE ride_id = ? AND chair_sent_at IS NULL ORDER BY created_at ASC LIMIT 1`, ride.ID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			var err error
-			status, err = getLatestRideStatus(ctx, db, ride.ID)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, err)
-				return
-			}
+			status = ride.LatestStatus
 		} else {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -287,22 +278,17 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 	switch req.Status {
 	// Acknowledge the ride
 	case "ENROUTE":
-		if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, "ENROUTE"); err != nil {
+		if err := insertRideStatus(ctx, tx, ride.ID, "ENROUTE"); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
 	// After Picking up user
 	case "CARRYING":
-		status, err := getLatestRideStatus(ctx, tx, ride.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		if status != "PICKUP" {
+		if ride.LatestStatus != "PICKUP" {
 			writeError(w, http.StatusBadRequest, errors.New("chair has not arrived yet"))
 			return
 		}
-		if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, "CARRYING"); err != nil {
+		if err := insertRideStatus(ctx, tx, ride.ID, "CARRYING"); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
