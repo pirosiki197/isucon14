@@ -57,7 +57,7 @@ bin/config push s1               # MANIFEST の s1 分を配って反映コマ�
 bin/config push app              # app を持つホスト全部に配る
 bin/config push s2 /etc/mysql/mysql.conf.d/z-isucon-tuning.cnf   # 1 ファイルだけ
 bin/config copy s1 s3            # s1 の設定を s3 に複製 (ローカルのみ)
-bin/config pull -n               # 何をするかだけ出す
+bin/config push s1 -n            # 転送も reload もせず、サーバ側との差分だけ出す
 ```
 
 ### 初動
@@ -77,6 +77,10 @@ bin/config copy s1 s3
 # 4. 配る
 bin/config push s3
 ```
+
+`push` は**中身が変わったファイルが 1 つも無ければ reload しない**。
+同じものを配り直してサービスが再起動する事故が起きない。
+何が動くかを先に見たいときは `-n` を付ける（rsync の itemize がそのまま出る）。
 
 `copy` がローカル操作で止まるのは、**差分を目で見てから配るため**。
 `env.sh` のようにホストごとに違ってよいファイルを、無自覚に上書きしないようにしている。

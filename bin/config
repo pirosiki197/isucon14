@@ -11,7 +11,7 @@
 #   bin/config copy <src-host> <dst-host> [path...]
 #   bin/config status
 #
-#   -n  実際には転送せず、何をするかだけ出す
+#   -n  転送も reload もせず、サーバ側との差分だけを出す
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -106,15 +106,42 @@ entry_applies() {
 # コメント行と空行を落とす
 table() { grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$1"; }
 
-# rsync の 23/24 は「一部のファイルが無かった」なので警告に留める
+# rsync の出力は rsync_out に取る。失敗したときだけそのまま見せる。
+# 23/24 は「一部のパスが無かった」なので警告に留める。
+rsync_out=""
 run_rsync() {
 	local rc=0
-	rsync "$@" || rc=$?
+	rsync_out=$(rsync "$@" 2>&1) || rc=$?
 	case "$rc" in
 	0) ;;
-	23 | 24) warn "rsync exit $rc: 一部のパスをスキップした" ;;
-	*) return "$rc" ;;
+	23 | 24)
+		warn "rsync exit $rc: 一部のパスをスキップした"
+		printf '%s\n' "$rsync_out" >&2
+		;;
+	*)
+		printf '%s\n' "$rsync_out" >&2
+		return "$rc"
+		;;
 	esac
+}
+
+# rsync -i の出力のうち、実際に動いた行だけを返す。
+# 先頭 1 文字が . のものは中身が変わっていない (属性のみ) なので落とす。
+changed_lines() { printf '%s\n' "$rsync_out" | grep -E '^([<>ch]|\*deleting)' || true; }
+
+# 件数だけ出す。初回の /etc のように数千件になるものは先頭だけ見せる
+report_changes() {
+	local label="$1" lines n
+	lines=$(changed_lines)
+	n=$(printf '%s' "$lines" | grep -c . || true)
+	if [ "$n" -eq 0 ]; then
+		printf '   %-24s 変更なし\n' "$label"
+		return 0
+	fi
+	printf '   %-24s %s 件\n' "$label" "$n"
+	printf '%s\n' "$lines" | sed -n '1,8s/^/      /p'
+	[ "$n" -gt 8 ] && echo "      ... 他 $((n - 8)) 件"
+	return 0
 }
 
 show_changes() {
@@ -126,7 +153,7 @@ show_changes() {
 		echo "   (変更なし)"
 		return 0
 	fi
-	git status --porcelain -- "$infra" | head -40
+	git status --porcelain -- "$infra" | sed -n '1,40p'
 	[ "$n" -gt 40 ] && echo "   ... 他 $((n - 40)) 件"
 	return 0
 }
@@ -157,7 +184,7 @@ cmd_pull() {
 		while read -r r path; do
 			entry_applies "$host" "$r" "$role_filter" || continue
 			dest="$infra/$host/${path#/}"
-			opts=(-rlpt --human-readable -e "$ssh_cmd" --exclude-from="$exclude_file" --rsync-path='sudo rsync')
+			opts=(-rlpt -i --human-readable -e "$ssh_cmd" --exclude-from="$exclude_file" --rsync-path='sudo rsync')
 			[ -n "$dry" ] && opts+=(--dry-run)
 
 			if [ "${path: -1}" = "/" ]; then
@@ -169,11 +196,11 @@ cmd_pull() {
 				mkdir -p "$(dirname "$dest")"
 			fi
 
-			echo "   $path"
 			if ! run_rsync "${opts[@]}" "$ssh_user@$addr:$path" "$dest"; then
 				warn "$host: 転送できないのでこのホストは skip する"
 				break
 			fi
+			report_changes "$path"
 		done < <(table "$pull_list")
 	done
 
@@ -245,20 +272,31 @@ push_one_host() {
 	echo "== push $host ($addr)"
 	local i
 	local -a opts
+	local changed=""
 	for i in "${!files[@]}"; do
-		echo "   ${files[$i]} -> ${remotes[$i]}"
-		[ -n "$dry" ] && continue
 		# 所有者とパーミッションは既存のものを保つので -a は使わない
-		opts=(-t --human-readable -e "$ssh_cmd" --rsync-path='sudo rsync')
+		opts=(-t -i --human-readable -e "$ssh_cmd" --rsync-path='sudo rsync')
+		# -n でも rsync は動かす。サーバ側と何が違うかはこれでしか分からない
+		[ -n "$dry" ] && opts+=(--dry-run)
+
 		if [ -d "${files[$i]}" ]; then
 			# ディレクトリは中身を配る。--delete はしない (サーバ側にしか無いファイルを消さない)
-			$ssh_cmd "$ssh_user@$addr" "sudo mkdir -p ${remotes[$i]}"
+			[ -n "$dry" ] || $ssh_cmd "$ssh_user@$addr" "sudo mkdir -p ${remotes[$i]}"
 			run_rsync -r "${opts[@]}" "${files[$i]%/}/" "$ssh_user@$addr:${remotes[$i]%/}/"
 		else
-			$ssh_cmd "$ssh_user@$addr" "sudo mkdir -p $(dirname "${remotes[$i]}")"
+			[ -n "$dry" ] || $ssh_cmd "$ssh_user@$addr" "sudo mkdir -p $(dirname "${remotes[$i]}")"
 			run_rsync "${opts[@]}" "${files[$i]}" "$ssh_user@$addr:${remotes[$i]}"
 		fi
+
+		report_changes "${remotes[$i]}"
+		if [ -n "$(changed_lines)" ]; then changed=1; fi
 	done
+
+	# 何も変わっていないなら reload は要らない
+	if [ -z "$changed" ]; then
+		echo "== $host: 変更が無いので reload しない"
+		return 0
+	fi
 
 	# 同じ反映コマンドは 1 回にまとめる
 	local -a done_cmds=()
