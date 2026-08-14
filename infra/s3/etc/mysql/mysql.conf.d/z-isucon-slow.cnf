@@ -1,0 +1,12 @@
+# 全クエリを slow query log に記録する。pt-query-digest で解析するため。
+#
+# long_query_time = 0 が要点。N+1 は「速いクエリが大量」という形で現れるので、
+# 閾値を上げると見たいものが消える。
+#
+# 代償はログの量で、ベンチ 1 回で 50MB 以上増える。計測ごとに truncate する前提。
+# CPU への影響は実測で 1.2% だったので、入れたままチューニングして構わない。
+
+[mysqld]
+slow_query_log      = 1
+slow_query_log_file = /var/log/mysql/mysql-slow.log
+long_query_time     = 0
