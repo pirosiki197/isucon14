@@ -266,7 +266,7 @@ push_one_host() {
 	}
 
 	echo "== push $host ($addr)"
-	local e lpath remote reload changed=""
+	local e lpath remote reload
 	local -a opts pending=()
 	for e in "${entries[@]}"; do
 		IFS=$'\t' read -r lpath remote reload <<<"$e"
@@ -286,12 +286,12 @@ push_one_host() {
 		fi
 
 		report_changes "$remote"
-		if [ -n "$(changed_lines)" ]; then changed=1; fi
-		if [ -n "$reload" ]; then pending+=("$reload"); fi
+		# 変わったファイルの反映コマンドだけを積む。触っていないファイルのために
+		# サービスを再起動しないため
+		if [ -n "$(changed_lines)" ] && [ -n "$reload" ]; then pending+=("$reload"); fi
 	done
 
-	# 何も変わっていないなら reload は要らない
-	if [ -z "$changed" ]; then
+	if [ "${#pending[@]}" -eq 0 ]; then
 		echo "== $host: 変更が無いので reload しない"
 		return 0
 	fi
