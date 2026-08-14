@@ -162,7 +162,9 @@ cmd_pull() {
 
 			if [ "${path: -1}" = "/" ]; then
 				mkdir -p "$dest"
-				opts+=(--delete)
+				# --delete-excluded まで付けないと、後から除外を足しても
+				# 既に取得済みのファイルが残り続ける
+				opts+=(--delete --delete-excluded)
 			else
 				mkdir -p "$(dirname "$dest")"
 			fi
@@ -200,7 +202,7 @@ collect_manifest() {
 		shopt -u nullglob
 
 		if [ "${#matches[@]}" -eq 0 ]; then
-			[ "${#filter[@]}" -eq 0 ] && warn "ローカルに無い: $local_glob (先に pull する)"
+			[ "${#filter[@]}" -eq 0 ] && warn "ローカルに無い: $local_glob (pull していないか、まだ作っていない)"
 			continue
 		fi
 
@@ -325,7 +327,7 @@ cmd_status() {
 	for h in $HOSTS; do
 		addr=$(host_addr "$h")
 		n=0
-		[ -d "$infra/$h" ] && n=$(find "$infra/$h" -type f | wc -l)
+		[ -d "$infra/$h" ] && n=$(find "$infra/$h" \( -type f -o -type l \) | wc -l)
 		printf '%-8s %-16s %-16s %s\n' "$h" "${addr:-(未設定)}" "$(host_roles "$h")" "$n"
 	done
 	show_changes
