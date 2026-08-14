@@ -207,7 +207,8 @@ cmd_pull() {
 	show_changes
 }
 
-# MANIFEST を展開して files/remotes/reloads に積む。
+# MANIFEST を展開して、1 行 1 件の TSV を stdout に出す。
+#   <ローカルのパス> \t <サーバ上のパス> \t <反映コマンド>
 # $1=ホスト名, $2=ソースのホスト名(通常は同じ。copy のときだけ違う),
 # $3=role の絞り込み(空なら全部), 残り=パスの絞り込み
 collect_manifest() {
@@ -215,10 +216,6 @@ collect_manifest() {
 	shift 3
 	local -a filter=("$@")
 	local r path reload local_glob m remote want f
-
-	files=()
-	remotes=()
-	reloads=()
 
 	while read -r r path reload; do
 		entry_applies "$host" "$r" "$role_filter" || continue
@@ -248,9 +245,7 @@ collect_manifest() {
 				done
 				[ -n "$want" ] || continue
 			fi
-			files+=("$m")
-			remotes+=("$remote")
-			reloads+=("$reload")
+			printf '%s\t%s\t%s\n' "$m" "$remote" "$reload"
 		done
 	done < <(table "$manifest")
 }
@@ -262,34 +257,37 @@ push_one_host() {
 	addr=$(host_addr "$host")
 	[ -n "$addr" ] || die "$host: ${host^^}_HOST が servers.env に無い"
 
-	local -a files remotes reloads
-	collect_manifest "$host" "$host" "$role_filter" "$@"
-	[ "${#files[@]}" -gt 0 ] || {
+	# ssh がループの stdin を食うので、先に全件読み切ってから回す
+	local -a entries=()
+	mapfile -t entries < <(collect_manifest "$host" "$host" "$role_filter" "$@")
+	[ "${#entries[@]}" -gt 0 ] || {
 		warn "$host: 配るものが無い"
 		return 0
 	}
 
 	echo "== push $host ($addr)"
-	local i
-	local -a opts
-	local changed=""
-	for i in "${!files[@]}"; do
+	local e lpath remote reload changed=""
+	local -a opts pending=()
+	for e in "${entries[@]}"; do
+		IFS=$'\t' read -r lpath remote reload <<<"$e"
+
 		# 所有者とパーミッションは既存のものを保つので -a は使わない
 		opts=(-t -i --human-readable -e "$ssh_cmd" --rsync-path='sudo rsync')
 		# -n でも rsync は動かす。サーバ側と何が違うかはこれでしか分からない
 		[ -n "$dry" ] && opts+=(--dry-run)
 
-		if [ -d "${files[$i]}" ]; then
+		if [ -d "$lpath" ]; then
 			# ディレクトリは中身を配る。--delete はしない (サーバ側にしか無いファイルを消さない)
-			[ -n "$dry" ] || $ssh_cmd "$ssh_user@$addr" "sudo mkdir -p ${remotes[$i]}"
-			run_rsync -r "${opts[@]}" "${files[$i]%/}/" "$ssh_user@$addr:${remotes[$i]%/}/"
+			[ -n "$dry" ] || $ssh_cmd "$ssh_user@$addr" "sudo mkdir -p $remote"
+			run_rsync -r "${opts[@]}" "${lpath%/}/" "$ssh_user@$addr:${remote%/}/"
 		else
-			[ -n "$dry" ] || $ssh_cmd "$ssh_user@$addr" "sudo mkdir -p $(dirname "${remotes[$i]}")"
-			run_rsync "${opts[@]}" "${files[$i]}" "$ssh_user@$addr:${remotes[$i]}"
+			[ -n "$dry" ] || $ssh_cmd "$ssh_user@$addr" "sudo mkdir -p $(dirname "$remote")"
+			run_rsync "${opts[@]}" "$lpath" "$ssh_user@$addr:$remote"
 		fi
 
-		report_changes "${remotes[$i]}"
+		report_changes "$remote"
 		if [ -n "$(changed_lines)" ]; then changed=1; fi
+		if [ -n "$reload" ]; then pending+=("$reload"); fi
 	done
 
 	# 何も変わっていないなら reload は要らない
@@ -301,8 +299,7 @@ push_one_host() {
 	# 同じ反映コマンドは 1 回にまとめる
 	local -a done_cmds=()
 	local c d seen
-	for c in "${reloads[@]}"; do
-		[ -n "$c" ] || continue
+	for c in "${pending[@]}"; do
 		seen=""
 		for d in "${done_cmds[@]:-}"; do
 			if [ "$d" = "$c" ]; then seen=1; fi
@@ -334,23 +331,24 @@ cmd_copy() {
 	is_host "$dst" || die "$dst はホスト名ではない"
 	[ -d "$infra/$src" ] || die "$infra/$src が無い (先に pull する)"
 
-	local -a files remotes reloads
-	collect_manifest "$dst" "$src" "" "$@"
-	[ "${#files[@]}" -gt 0 ] ||
+	local -a entries=()
+	mapfile -t entries < <(collect_manifest "$dst" "$src" "" "$@")
+	[ "${#entries[@]}" -gt 0 ] ||
 		die "コピーするものが無い ($dst の role は [$(host_roles "$dst")]。servers.env の ${dst^^}_ROLES を確認する)"
 
 	echo "== copy $src -> $dst (ローカルのみ。反映は push $dst)"
-	local i dest
-	for i in "${!files[@]}"; do
-		dest="$infra/$dst/${remotes[$i]#/}"
-		echo "   ${files[$i]} -> $dest"
+	local e lpath remote reload dest
+	for e in "${entries[@]}"; do
+		IFS=$'\t' read -r lpath remote reload <<<"$e"
+		dest="$infra/$dst/${remote#/}"
+		echo "   $lpath -> $dest"
 		[ -n "$dry" ] && continue
-		if [ -d "${files[$i]}" ]; then
+		if [ -d "$lpath" ]; then
 			mkdir -p "$dest"
-			cp -a "${files[$i]%/}/." "${dest%/}/"
+			cp -a "${lpath%/}/." "${dest%/}/"
 		else
 			mkdir -p "$(dirname "$dest")"
-			cp -p "${files[$i]}" "$dest"
+			cp -p "$lpath" "$dest"
 		fi
 	done
 
