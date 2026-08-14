@@ -1,0 +1,399 @@
+#!/usr/bin/env python3
+"""アプリを配って再起動する。
+
+  bin/deploy [host|role...]          ローカルの HEAD を配る (既定は role=app)
+  bin/deploy --check [host|role...]  今どの SHA が動いているか見るだけ
+  bin/deploy -n [host|role...]       何をするかだけ出す
+
+配るのは HEAD (コミット済みの状態) で、未コミットの変更は載らない。deploy の
+仕事は deploy だけなので、汚れていても止めない。
+
+既定ではバイナリを**ローカルでクロスビルドして送る**。アプリサーバーの CPU と
+メモリを使わないので、ベンチの直前でも安全で、メモリの小さい機械でも通る。
+ローカルに go が無いときは --remote-build でサーバー側でビルドする。
+
+アセット (sql/, public/ など) と「サーバーに載っている SHA」は git で合わせる。
+アプリの名前や unit 名は infra/app.env に書く。設定ファイルは bin/config の担当。
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _isucon import (  # noqa: E402
+    APP_ENV,
+    REPO,
+    SSH_CONNECT_TIMEOUT,
+    Host,
+    die,
+    load_env,
+    resolve,
+    ssh,
+    warn,
+)
+
+STAGED = ".deploy.bin"  # 送り込んだバイナリの置き場 (差し替え前)
+BUILD_OUT = REPO / ".deploy"  # ローカルのビルド成果物
+
+
+@dataclass(frozen=True)
+class App:
+    dir: str
+    build_dir: str
+    binary: str
+    service: str
+    extra: str
+    health_url: str
+
+    @property
+    def units(self) -> list[str]:
+        return [self.service, *self.extra.split()]
+
+
+def app_config(env: dict[str, str]) -> App:
+    missing = [k for k in ("APP_BINARY", "APP_SERVICE") if not env.get(k)]
+    if missing:
+        die(f"{APP_ENV} に {' と '.join(missing)} を書く")
+    return App(
+        dir=env.get("APP_DIR") or "/home/isucon/webapp",
+        build_dir=env.get("BUILD_DIR") or "go",
+        binary=env["APP_BINARY"],
+        service=env["APP_SERVICE"],
+        extra=env.get("EXTRA_SERVICES") or "",
+        health_url=env.get("HEALTH_URL") or "http://127.0.0.1:8080/",
+    )
+
+
+# --- ローカル (git) -------------------------------------------------------
+
+
+def git(*args: str) -> str:
+    p = subprocess.run(["git", *args], cwd=REPO, capture_output=True, text=True)
+    if p.returncode != 0:
+        die(f"git {' '.join(args)}: {(p.stderr or p.stdout).strip()}")
+    return p.stdout.strip()
+
+
+def git_ok(*args: str) -> bool:
+    return subprocess.run(["git", *args], cwd=REPO, capture_output=True, text=True).returncode == 0
+
+
+def prepare_source(no_push: bool, dry: bool) -> tuple[str, str]:
+    """HEAD を origin に載せる。(sha, origin の URL) を返す。"""
+    branch = git("rev-parse", "--abbrev-ref", "HEAD")
+    if branch == "HEAD":
+        die("detached HEAD。ブランチに乗ってから実行する")
+    sha = git("rev-parse", "HEAD")
+    url = git("remote", "get-url", "origin")
+    if url.startswith(("git@", "ssh://")):
+        warn(f"origin が SSH ({url})。サーバーに鍵が無いと fetch できない")
+
+    print("== ローカル")
+    print(f"   {sha[:7]} {git('log', '-1', '--format=%s')}")
+
+    if git_ok("merge-base", "--is-ancestor", "HEAD", f"origin/{branch}"):
+        print(f"   origin/{branch} に載っている")
+    elif no_push:
+        die(f"HEAD が origin/{branch} に無い (--no-push 指定なので push しない)")
+    elif dry:
+        print(f"   [dry-run] git push origin HEAD:{branch}")
+    else:
+        p = subprocess.run(
+            ["git", "push", "origin", f"HEAD:{branch}"], cwd=REPO, capture_output=True, text=True
+        )
+        if p.returncode != 0:
+            die(f"push できない: {(p.stderr or p.stdout).strip()}")
+        print(f"   origin/{branch} に push した")
+    return sha, url
+
+
+def build_local(app: App) -> Path:
+    go = shutil.which("go")
+    if not go:
+        die("ローカルに go が無い。サーバーでビルドするなら --remote-build")
+    BUILD_OUT.mkdir(exist_ok=True)
+    out = BUILD_OUT / f"{app.binary}-linux-amd64"
+    t0 = time.monotonic()
+    p = subprocess.run(
+        [go, "build", "-o", str(out), "."],
+        cwd=REPO / app.build_dir,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "GOOS": "linux", "GOARCH": "amd64", "CGO_ENABLED": "0"},
+    )
+    if p.returncode != 0:
+        print((p.stderr or p.stdout).rstrip(), file=sys.stderr)
+        die("ビルドできない")
+    size = out.stat().st_size / 1024 / 1024
+    print(f"   build: {size:.1f}MiB {time.monotonic() - t0:.1f}s (linux/amd64, CGO 無効)")
+    return out
+
+
+# --- サーバー側のスクリプト ------------------------------------------------
+
+
+def header(app: App, sha: str = "", url: str = "") -> str:
+    def q(s: str) -> str:
+        return "'" + s.replace("'", "'\\''") + "'"
+
+    return f"""
+APP_DIR={q(app.dir)}
+BUILD_DIR={q(app.build_dir)}
+APP_BINARY={q(app.binary)}
+UNITS={q(" ".join(app.units))}
+HEALTH_URL={q(app.health_url)}
+SHA={q(sha)}
+REPO_URL={q(url)}
+bdir="$APP_DIR/$BUILD_DIR"
+bin_path="$bdir/$APP_BINARY"
+staged="$bdir/{STAGED}"
+"""
+
+
+# 公式 AMI の webapp は git 管理外なので、初回はここで repo にする。
+# reset --hard は既定で置かれているファイル (untracked) を上書きする。
+SYNC = """
+cd "$APP_DIR" 2>/dev/null || { echo "$APP_DIR が無い"; exit 1; }
+if [ ! -d .git ]; then
+  git init -q && git remote add origin "$REPO_URL" || exit 1
+  echo "repo: git init して origin を設定した"
+elif [ "$(git remote get-url origin 2>/dev/null)" != "$REPO_URL" ]; then
+  git remote set-url origin "$REPO_URL" 2>/dev/null || git remote add origin "$REPO_URL"
+  echo "repo: origin を差し替えた"
+fi
+git fetch -q --prune origin || { echo "fetch できない (ネットワーク? 認証?)"; exit 1; }
+before=$(git rev-parse --short HEAD 2>/dev/null || echo -)
+git reset -q --hard "$SHA" || { echo "reset --hard $SHA できない"; exit 1; }
+echo "sha: $before -> $(git rev-parse --short HEAD)"
+"""
+
+# 走っているバイナリは書き込めない (ETXTBSY) が、rename では置き換えられる。
+ACTIVATE = """
+[ -f "$staged" ] || { echo "送ったバイナリが無い ($staged)"; exit 1; }
+chmod 0755 "$staged" && mv -f "$staged" "$bin_path" || { echo "差し替えられない"; exit 1; }
+echo "bin: $APP_BINARY を差し替えた"
+"""
+
+BUILD_REMOTE = """
+cd "$bdir" 2>/dev/null || { echo "$bdir が無い"; exit 1; }
+best=""; bestv=""
+for c in /usr/local/go/bin/go "$HOME/local/golang/bin/go" "$(command -v go 2>/dev/null)"; do
+  [ -n "$c" ] && [ -x "$c" ] || continue
+  v=$("$c" version 2>/dev/null | cut -d' ' -f3); v=${v#go}
+  [ -n "$v" ] || continue
+  if [ -z "$bestv" ] || [ "$(printf '%s\\n%s\\n' "$bestv" "$v" | sort -V | tail -1)" = "$v" ]; then
+    best="$c"; bestv="$v"
+  fi
+done
+[ -n "$best" ] || { echo "サーバーに go が無い"; exit 1; }
+export GOTOOLCHAIN=auto
+# メモリの小さい機械では並列ビルドで OOM するので 1 本に落とす
+mem=$(sed -n 's/^MemTotal: *\\([0-9]*\\).*/\\1/p' /proc/meminfo)
+[ "${mem:-0}" -lt 2000000 ] && export GOFLAGS="-p=1"
+t0=$SECONDS
+if out=$("$best" build -o "$APP_BINARY" . 2>&1); then
+  echo "build: go$bestv で $((SECONDS - t0))s"
+else
+  echo "build 失敗: $best (go$bestv, go.mod は go$(sed -n 's/^go //p' go.mod | head -1) を要求)"
+  echo "$out" | sed -n '1,20p'
+  exit 1
+fi
+"""
+
+RESTART = """
+sudo systemctl restart $UNITS || { echo "restart 失敗: $UNITS"; exit 1; }
+sleep 1
+rc=0
+for u in $UNITS; do
+  st=$(systemctl is-active "$u")
+  echo "svc: $u $st"
+  if [ "$st" != active ]; then
+    rc=1
+    journalctl -u "$u" -n 12 --no-pager | sed 's/^/     /'
+  fi
+done
+code=$(curl -s -o /dev/null -m 3 -w '%{http_code}' "$HEALTH_URL" || echo 000)
+echo "http: $HEALTH_URL -> $code"
+[ "$code" = 000 ] && rc=1
+exit $rc
+"""
+
+CHECK = """
+cd "$APP_DIR" 2>/dev/null || { echo "sha=($APP_DIR が無い)"; exit 0; }
+if [ -d .git ]; then
+  echo "sha=$(git rev-parse --short HEAD)"
+else
+  echo "sha=(git 管理外)"
+fi
+for u in $UNITS; do echo "svc_$u=$(systemctl is-active "$u")"; done
+echo "http=$(curl -s -o /dev/null -m 3 -w '%{http_code}' "$HEALTH_URL" || echo 000)"
+if [ -f "$bin_path" ]; then
+  echo "built=$(date -d "@$(stat -c %Y "$bin_path")" '+%m/%d %H:%M')"
+else
+  echo "built=-"
+fi
+"""
+
+
+# --- 実行 -----------------------------------------------------------------
+
+
+def send_binary(host: Host, app: App, local: Path) -> tuple[bool, str]:
+    dest = f"isucon@{host.addr}:{app.dir}/{app.build_dir}/{STAGED}"
+    p = subprocess.run(
+        [
+            "rsync",
+            "-z",
+            "--checksum",  # 中身が同じなら送らない (mtime は毎回変わる)
+            "--info=stats2",
+            "-e",
+            f"ssh -o ConnectTimeout={SSH_CONNECT_TIMEOUT}",
+            str(local),
+            dest,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if p.returncode != 0:
+        detail = (p.stderr or p.stdout).strip().replace("\n", " ")
+        return False, f"send 失敗 (rsync rc={p.returncode}): {detail[:160]}"
+    sent = next(
+        (
+            line.split(":", 1)[1].strip()
+            for line in p.stdout.splitlines()
+            if line.startswith("Total transferred")
+        ),
+        "",
+    )
+    return True, f"send: {sent or '転送済み'}"
+
+
+def deploy_host(host: Host, app: App, sha: str, url: str, binary: Path | None) -> tuple:
+    t0 = time.monotonic()
+    lines: list[str] = []
+    hd = header(app, sha, url)
+
+    r = ssh(host, hd + SYNC)
+    lines += r.out.splitlines()
+    if not r.ok:
+        return host, lines, False, time.monotonic() - t0
+
+    if binary is not None:
+        ok, msg = send_binary(host, app, binary)
+        lines.append(msg)
+        if not ok:
+            return host, lines, False, time.monotonic() - t0
+        r = ssh(host, hd + ACTIVATE + RESTART)
+    else:
+        r = ssh(host, hd + BUILD_REMOTE + RESTART)
+    lines += r.out.splitlines()
+    return host, lines, r.ok, time.monotonic() - t0
+
+
+def do_deploy(targets: list[Host], app: App, sha: str, url: str, binary: Path | None) -> int:
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=max(1, len(targets))) as pool:
+        results = list(pool.map(lambda h: deploy_host(h, app, sha, url, binary), targets))
+
+    failed = []
+    for host, lines, ok, sec in results:
+        print(f"\n== {host.name} ({host.addr})  {sec:.1f}s")
+        for line in lines:
+            print(f"   {line}")
+        if not ok:
+            failed.append(host.name)
+            print("   → 失敗")
+    print()
+    if failed:
+        print(f"デプロイ失敗: {' '.join(failed)}")
+        return 1
+    print(f"デプロイ完了: {' '.join(h.name for h in targets)} → {sha[:7]}")
+    return 0
+
+
+def do_check(targets: list[Host], app: App) -> int:
+    from _isucon import ssh_all
+
+    def parse(out: str) -> dict[str, str]:
+        kv = {}
+        for line in out.splitlines():
+            key, sep, val = line.partition("=")
+            if sep and " " not in key:
+                kv[key] = val.strip()
+        return kv
+
+    results = ssh_all(targets, header(app) + CHECK)
+    cols = ["SHA", *app.units, ":health", "built"]
+    widths = [6, 18] + [max(12, len(c) + 1) for c in cols[1:]]
+    local = git("rev-parse", "--short", "HEAD")
+
+    def row(cells: list[str]) -> str:
+        return "  ".join(f"{c:<{w}}" for c, w in zip(cells, widths))
+
+    print(row(["HOST", *cols]))
+    bad = 0
+    for r in results:
+        kv = parse(r.out)
+        if "sha" not in kv:
+            print(row([r.host.name, f"ssh 不通: {r.out.splitlines()[0] if r.out else r.rc}"]))
+            bad = 1
+            continue
+        sha = kv["sha"]
+        if sha == local:
+            sha += " (HEAD)"
+        elif not sha.startswith("("):
+            sha += " (古い)"
+        cells = [kv.get(f"svc_{u}", "?") for u in app.units]
+        print(row([r.host.name, sha, *cells, kv.get("http", "?"), kv.get("built", "-")]))
+        if any(c != "active" for c in cells) or kv.get("http") == "000":
+            bad = 1
+    if bad:
+        print("\n動いていない、または届かないホストがある")
+    return bad
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(add_help=True, description=__doc__)
+    ap.add_argument("--check", action="store_true", help="状態を見るだけ")
+    ap.add_argument("-n", "--dry-run", action="store_true", help="何をするかだけ出す")
+    ap.add_argument("--no-push", action="store_true", help="origin に push しない")
+    ap.add_argument("--remote-build", action="store_true", help="サーバー側でビルドする")
+    ap.add_argument("targets", nargs="*", help="ホスト名か role (既定は role=app)")
+    args = ap.parse_args()
+
+    env = load_env()
+    app = app_config(env)
+    targets = resolve(args.targets or ["app"], env)
+
+    if args.check:
+        return do_check(targets, app)
+
+    sha, url = prepare_source(args.no_push, args.dry_run)
+
+    if args.dry_run:
+        print(f"\n[dry-run] {' '.join(h.name for h in targets)} を {sha[:7]} にする:")
+        print(f"   {app.dir} で fetch + reset --hard {sha[:7]}")
+        if args.remote_build:
+            print(f"   サーバーの {app.build_dir}/ で go build -o {app.binary} .")
+        else:
+            print(f"   ローカルで go build → {app.dir}/{app.build_dir}/{app.binary} に送る")
+        print(f"   sudo systemctl restart {' '.join(app.units)}")
+        print(f"   {app.health_url} で起動確認")
+        return 0
+
+    binary = None if args.remote_build else build_local(app)
+    return do_deploy(targets, app, sha, url, binary)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

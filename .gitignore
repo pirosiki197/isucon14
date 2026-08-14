@@ -3,3 +3,5 @@
 
 # ビルド成果物
 /go/isuride
+/.deploy/
+__pycache__/

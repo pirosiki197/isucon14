@@ -76,14 +76,36 @@ systemd サービスは `isuride-go`(`/home/isucon/webapp/go/isuride`)、`isurid
 
 ### Go のバージョンに注意
 
-サーバーには Go が 2 つある。**`go.mod` の `go 1.26` を満たすのは `/usr/local/go/bin/go`(1.26.5)だけ**で、`~/local/golang/bin/go` は 1.23.2 でビルドできない。`.profile` は `/usr/local/go/bin` を PATH 先頭に置くよう直してあるが、**非対話の `ssh host 'go ...'` では `.profile` も `.bashrc` も読まれない**ため、スクリプトからはフルパスで呼ぶ。
+公式 AMI に入っているのは `~/local/golang/bin/go`(1.23.2)だけで、**`go.mod` の `go 1.26` を満たさない**。`bin/deploy` は既定でローカルビルドなので普段は関係ないが、`--remote-build` するときは `GOTOOLCHAIN=auto` での toolchain ダウンロード(または新しい Go の導入)が必要になる。
+
+**非対話の `ssh host 'go ...'` では `.profile` も `.bashrc` も読まれない**ため、スクリプトからはフルパスで呼ぶ。
 
 ### デプロイ
 
 ```bash
-. ./servers.env
-ssh "isucon@$APP_HOST" 'cd /home/isucon/webapp && git pull && cd go && /usr/local/go/bin/go build -o isuride . && sudo systemctl restart isuride-go'
+bin/deploy            # role=app のホスト全部に HEAD を配る
+bin/deploy --check    # どのホストがどの SHA で動いているか
+bin/deploy -n s1      # 何をするかだけ出す
 ```
+
+配るのは **HEAD (コミット済みの状態)**。未コミットの変更は載らないが、止めもしない。
+`origin` に無ければ push してから、サーバー側で `fetch` + `reset --hard <sha>` する
+(「サーバーに載っている SHA」を言えるようにするため)。
+
+バイナリは**ローカルでクロスビルドして rsync で送る**。アプリサーバーの CPU と
+メモリを使わないので、メモリの小さい機械でも通る(1GiB の t3.micro でサーバー側
+ビルドをやらせて SSH ごと落とした)。ローカルに go が無いときは `--remote-build`。
+
+アプリの名前・unit 名・起動確認 URL は `infra/app.env`。ツール側には持たせない。
+
+### 計測できる状態にする
+
+```bash
+bin/setup            # alp と pt-query-digest を入れる (入っていれば何もしない)
+bin/setup --check    # 道具とログ設定が揃っているかを 1 コマンドで見る
+```
+
+ログ設定(nginx の ltsv、slow query log)はファイルなので `infra/` にあり、`bin/config push` で配る。`bin/setup` は道具だけを扱い、チューニング設定(fsync など)には触らない。
 
 ### 設定ファイル (アプリコード以外)
 

@@ -28,6 +28,28 @@ role の使い道は 1 つだけで、**[PULL](PULL) と [MANIFEST](MANIFEST) �
 役割は大会中に変わる（`s3` が遊んでいる状態 → 2 台目のアプリになる）ので、
 role でディレクトリを切ると、そのたびにファイルが引っ越して履歴が追えなくなります。
 
+## app.env — この大会のアプリの定義
+
+[app.env](app.env) は、`bin/deploy`（と将来の `bin/bench`）が読む設定。
+アプリのディレクトリ名・バイナリ名・unit 名・起動確認の URL を書く。
+
+```sh
+APP_DIR="/home/isucon/webapp"
+BUILD_DIR="go"
+APP_BINARY="isuride"                  # unit の ExecStart のファイル名
+APP_SERVICE="isuride-go"              # コードを変えたら再起動する unit
+EXTRA_SERVICES=""
+HEALTH_URL="http://127.0.0.1:8080/"
+```
+
+**サーバから自動で見つけるのではなく、初動で書き写す。** 自動発見は
+「別言語の unit を掴む」「ExecStart がラッパー経由」といった形で静かに外れ、
+大会中にアプリではなくツールを疑う時間が生まれる。`systemctl cat <unit>` は
+初動でどうせ読むので、書き写すコストはほぼ無い。
+
+アドレスと違って秘密ではないので、`servers.env` と分けて**git 管理下に置く**。
+これでツール側のコードから大会固有の名前が消える。
+
 ## pull は広く、push は狭く
 
 | | 対象 | 定義 |
@@ -117,12 +139,12 @@ MANIFEST のパスは末尾に `/` を付けるとディレクトリごと配れ
 
 ## 次の大会で使い回す
 
-問題固有の情報は `MANIFEST` の中身（サービス名・設定ファイル名）だけで、
-`bin/config` と `PULL` と `rsync-exclude` はそのまま持っていける。
+問題固有の情報は `MANIFEST` の中身（サービス名・設定ファイル名）と
+`app.env` の値だけで、`bin/` 以下と `PULL` と `rsync-exclude` はそのまま持っていける。
 
 ```bash
-cp -r bin/config infra/{PULL,rsync-exclude} servers.env.example <新しいリポジトリ>/
+cp -r bin infra/{PULL,rsync-exclude,app.env} servers.env.example <新しいリポジトリ>/
 ```
 
-新しい大会では `servers.env` を書いて `bin/config pull` し、
-サーバを触りながら `MANIFEST` に行を足していく。
+新しい大会では `servers.env` と `app.env` を書き、`bin/config pull` して commit。
+あとはサーバを触りながら `MANIFEST` に行を足していく。

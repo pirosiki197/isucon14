@@ -1,7 +1,9 @@
-"""servers.env のホスト表と ssh 実行。bin/setup と bin/bench が使う。
+"""設定の読み込み、ホスト表、ssh 実行。bin/ 以下のツールが共有する。
 
-servers.env はシェルのファイル (run_bench.sh も読むし、ISUCON の env.sh と同じ流儀)
-なので、パースせず bash に読ませて環境変数として受け取る。
+読むのは 2 つ。infra/app.env (この大会のアプリの定義、git 管理下) と
+servers.env (アドレス、gitignore)。どちらもシェルのファイル (run_bench.sh も
+読むし、ISUCON の env.sh と同じ流儀) なので、パースせず bash に読ませて
+環境変数として受け取る。servers.env が後なので、必要ならそちらで上書きできる。
 """
 
 from __future__ import annotations
@@ -26,12 +28,20 @@ def warn(msg: str) -> None:
     print(f"warn:  {msg}", file=sys.stderr)
 
 
+APP_ENV = "infra/app.env"
+
+
 def load_env() -> dict[str, str]:
-    path = REPO / "servers.env"
-    if not path.exists():
+    if not (REPO / "servers.env").exists():
         die("servers.env が無い (servers.env.example をコピーして作る)")
+    files = ["./servers.env"]
+    if (REPO / APP_ENV).exists():
+        files.insert(0, f"./{APP_ENV}")
+    else:
+        warn(f"{APP_ENV} が無いので既定値で動く")
+    src = "; ".join(f". {f}" for f in files)
     out = subprocess.run(
-        ["bash", "-c", "set -a; . ./servers.env; env -0"],
+        ["bash", "-c", f"set -a; {src}; env -0"],
         cwd=REPO,
         capture_output=True,
         text=True,
