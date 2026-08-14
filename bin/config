@@ -40,6 +40,8 @@ load_env() {
 	. ./servers.env
 	: "${HOSTS:?servers.env に HOSTS を設定してください (例: HOSTS=\"s1 s2 s3\")}"
 	ssh_user="${SSH_USER:-isucon}"
+	# 落ちているホストで待たされないようにする
+	ssh_cmd="ssh -o ConnectTimeout=${SSH_CONNECT_TIMEOUT:-10}"
 }
 
 # ホスト名 foo に対して FOO_HOST / FOO_PRIVATE_IP / FOO_ROLES を引く
@@ -155,7 +157,7 @@ cmd_pull() {
 		while read -r r path; do
 			entry_applies "$host" "$r" "$role_filter" || continue
 			dest="$infra/$host/${path#/}"
-			opts=(-rlpt --human-readable --exclude-from="$exclude_file" --rsync-path='sudo rsync')
+			opts=(-rlpt --human-readable -e "$ssh_cmd" --exclude-from="$exclude_file" --rsync-path='sudo rsync')
 			[ -n "$dry" ] && opts+=(--dry-run)
 
 			if [ "${path: -1}" = "/" ]; then
@@ -166,7 +168,10 @@ cmd_pull() {
 			fi
 
 			echo "   $path"
-			run_rsync "${opts[@]}" "$ssh_user@$addr:$path" "$dest"
+			if ! run_rsync "${opts[@]}" "$ssh_user@$addr:$path" "$dest"; then
+				warn "$host: 転送できないのでこのホストは skip する"
+				break
+			fi
 		done < <(table "$pull_list")
 	done
 
@@ -242,13 +247,13 @@ push_one_host() {
 		echo "   ${files[$i]} -> ${remotes[$i]}"
 		[ -n "$dry" ] && continue
 		# 所有者とパーミッションは既存のものを保つので -a は使わない
-		opts=(-t --human-readable --rsync-path='sudo rsync')
+		opts=(-t --human-readable -e "$ssh_cmd" --rsync-path='sudo rsync')
 		if [ -d "${files[$i]}" ]; then
 			# ディレクトリは中身を配る。--delete はしない (サーバ側にしか無いファイルを消さない)
-			ssh "$ssh_user@$addr" "sudo mkdir -p ${remotes[$i]}"
+			$ssh_cmd "$ssh_user@$addr" "sudo mkdir -p ${remotes[$i]}"
 			run_rsync -r "${opts[@]}" "${files[$i]%/}/" "$ssh_user@$addr:${remotes[$i]%/}/"
 		else
-			ssh "$ssh_user@$addr" "sudo mkdir -p $(dirname "${remotes[$i]}")"
+			$ssh_cmd "$ssh_user@$addr" "sudo mkdir -p $(dirname "${remotes[$i]}")"
 			run_rsync "${opts[@]}" "${files[$i]}" "$ssh_user@$addr:${remotes[$i]}"
 		fi
 	done
@@ -266,7 +271,7 @@ push_one_host() {
 		done_cmds+=("$c")
 		echo "== reload $host: $c"
 		[ -n "$dry" ] && continue
-		ssh "$ssh_user@$addr" "$c"
+		$ssh_cmd "$ssh_user@$addr" "$c"
 	done
 }
 
