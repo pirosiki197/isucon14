@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""計測できる状態にする。
+
+  bin/setup [host|role...]           道具を入れて、最後に検査する
+  bin/setup --check [host|role...]   検査だけ
+
+入れるのは道具 (alp / pt-query-digest) だけ。ログ設定は infra/ にあるので
+bin/config push で配る。チューニング設定 (fsync など) はここでは触らない
+— 1 手ずつ測るために、計測基盤と性能変更は分けておく。
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
+
+from _isucon import Host, Result, resolve, ssh_all  # noqa: E402
+
+ALP_URL = "https://github.com/tkuchiki/alp/releases/latest/download/alp_linux_amd64.tar.gz"
+
+INSTALL_ALP = f"""
+if command -v alp >/dev/null; then
+  echo "alp: すでに入っている ($(alp --version 2>&1 | head -1))"
+else
+  tmp=$(mktemp -d)
+  if curl -sSLf -o "$tmp/alp.tar.gz" {ALP_URL}; then
+    tar -xzf "$tmp/alp.tar.gz" -C "$tmp"
+    bin=$(find "$tmp" -type f -name alp | head -1)
+    if [ -n "$bin" ]; then
+      sudo install -m 0755 "$bin" /usr/local/bin/alp
+      echo "alp: 入れた ($(/usr/local/bin/alp --version 2>&1 | head -1))"
+    else
+      echo "alp: tarball に alp が見つからない" >&2
+    fi
+  else
+    echo "alp: ダウンロードできない (外に出られない?)" >&2
+  fi
+  rm -rf "$tmp"
+fi
+"""
+
+INSTALL_PT = """
+if command -v pt-query-digest >/dev/null; then
+  echo "pt-query-digest: すでに入っている"
+else
+  install_pt() { sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq percona-toolkit; }
+  if install_pt >/dev/null 2>&1 || { sudo apt-get update -qq && install_pt >/dev/null 2>&1; }; then
+    echo "pt-query-digest: 入れた"
+  else
+    echo "pt-query-digest: apt install に失敗した" >&2
+  fi
+fi
+"""
+
+# KEY=VALUE を並べて返す。ok / NG / - (対象外) / ? (判定できない)
+CHECK = """
+have() { command -v "$1" >/dev/null && echo ok || echo NG; }
+echo "alp=$(have alp)"
+echo "ptqd=$(have pt-query-digest)"
+
+if command -v nginx >/dev/null; then
+  if sudo nginx -T 2>/dev/null | grep -qE 'access_log[^;]*ltsv'; then
+    echo "nginx_ltsv=ok"
+  else
+    echo "nginx_ltsv=NG"
+  fi
+else
+  echo "nginx_ltsv=-"
+fi
+
+if command -v mysql >/dev/null; then
+  v=$(sudo mysql -Nse "SELECT @@slow_query_log = 1 AND @@long_query_time = 0" 2>/dev/null || true)
+  case "$v" in
+  1) echo "slow_log=ok" ;;
+  0) echo "slow_log=NG" ;;
+  *) echo "slow_log=?" ;;
+  esac
+else
+  echo "slow_log=-"
+fi
+"""
+
+# 検査項目 → (見出し, どの role のとき見るか, 直し方)
+ITEMS = [
+    ("alp", "alp", "app", "bin/setup {host}"),
+    ("ptqd", "pt-query-digest", "db", "bin/setup {host}"),
+    ("nginx_ltsv", "nginx(ltsv)", "app", "bin/config push {host} /etc/nginx/nginx.conf"),
+    ("slow_log", "slow_query_log", "db", "bin/config push {host} /etc/mysql/mysql.conf.d/z-isucon-slow.cnf"),
+]
+
+
+def install(targets: list[Host]) -> None:
+    scripts = {}
+    for h in targets:
+        parts = ["set -u"]
+        if h.has_role("app"):
+            parts.append(INSTALL_ALP)
+        if h.has_role("db"):
+            parts.append(INSTALL_PT)
+        scripts[h.name] = "\n".join(parts)
+
+    # ホストごとに内容が違うので ssh_all をホスト 1 台ずつ束ねて呼ぶ
+    from concurrent.futures import ThreadPoolExecutor
+
+    from _isucon import ssh
+
+    with ThreadPoolExecutor(max_workers=max(1, len(targets))) as pool:
+        results = list(pool.map(lambda h: ssh(h, scripts[h.name]), targets))
+
+    for r in results:
+        print(f"== {r.host.name} ({r.host.addr})")
+        for line in r.out.splitlines():
+            print(f"   {line}")
+        if not r.ok:
+            print(f"   (ssh が rc={r.rc} で終了)")
+
+
+def parse(out: str) -> dict[str, str]:
+    kv = {}
+    for line in out.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            kv[k.strip()] = v.strip()
+    return kv
+
+
+def check(targets: list[Host]) -> int:
+    results: list[Result] = ssh_all(targets, CHECK)
+    rows = {r.host.name: parse(r.out) for r in results}
+
+    heads = [h for _, h, _, _ in ITEMS]
+    print("  ".join([f"{'HOST':<6}"] + [f"{h:<16}" for h in heads]))
+    ng: list[tuple[str, str]] = []
+    for r in results:
+        cells = []
+        for key, _head, role, fix in ITEMS:
+            if not r.host.has_role(role):
+                cells.append("-")
+                continue
+            v = rows[r.host.name].get(key, "?")
+            cells.append(v)
+            if v != "ok":
+                ng.append((r.host.name, fix.format(host=r.host.name)))
+        print("  ".join([f"{r.host.name:<6}"] + [f"{c:<16}" for c in cells]))
+
+    if not ng:
+        print("\n計測できる状態です。")
+        return 0
+
+    print("\n直し方:")
+    for cmd in dict.fromkeys(cmd for _, cmd in ng):
+        print(f"   {cmd}")
+    return 1
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(add_help=True, description=__doc__)
+    ap.add_argument("--check", action="store_true", help="検査だけ行う")
+    ap.add_argument("targets", nargs="*", help="ホスト名か role (既定は全ホスト)")
+    args = ap.parse_args()
+
+    targets = resolve(args.targets)
+    if not args.check:
+        install(targets)
+        print()
+    return check(targets)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
