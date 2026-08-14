@@ -13,8 +13,12 @@
 
 app  /etc/nginx/nginx.conf                     sudo nginx -t && sudo systemctl reload nginx
 app  /etc/nginx/sites-available/isuride.conf   sudo nginx -t && sudo systemctl reload nginx
-app  /etc/systemd/system/nginx.service.d/*.conf   sudo systemctl daemon-reload && sudo systemctl restart nginx
-app  /etc/systemd/system/isuride-*.service     sudo systemctl daemon-reload && sudo systemctl restart isuride-go
+app  /etc/systemd/system/isuride-go.service      sudo systemctl daemon-reload && sudo systemctl restart isuride-go
+app  /etc/systemd/system/isuride-matcher.service sudo systemctl daemon-reload && sudo systemctl restart isuride-matcher
 app  /home/isucon/env.sh                       sudo chown isucon: /home/isucon/env.sh && sudo systemctl restart isuride-go isuride-matcher
 
 db   /etc/mysql/mysql.conf.d/z-isucon-*.cnf    sudo systemctl restart mysql
+
+# まだサーバ上に無いファイル。作ったら pull すればここが効く
+# (push すると「ローカルに無い」と警告が出るだけで害は無い)
+app  /etc/systemd/system/nginx.service.d/*.conf  sudo systemctl daemon-reload && sudo systemctl restart nginx

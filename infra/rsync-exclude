@@ -29,3 +29,9 @@ blkid.tab*
 # --- 中身が大きいだけで見ない ---
 ssl/certs/
 ca-certificates/
+
+# TLS の鍵と証明書。push することは無いし、鍵を取り込みたくない
+nginx/tls/
+
+# dpkg が管理するシンボリックリンク農場。中身に情報が無い
+alternatives/

@@ -11,6 +11,8 @@
 *  /home/isucon/env.sh
 *  /home/isucon/.profile
 *  /home/isucon/.bashrc
+*  /home/isucon/.zshrc
+*  /home/isucon/.local.env
 
 # サーバ上で書いた雑スクリプトを置く場所を決めたらここに足す
 # *  /home/isucon/bin/
