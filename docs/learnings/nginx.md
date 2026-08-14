@@ -123,7 +123,5 @@ cat /proc/$(pgrep -f 'nginx: worker' | head -1)/limits | grep -i 'open files'
 ## アクセスログは切らなくてよい
 
 `access_log off` にして測ったが、CPU は 0.8 秒しか変わらなかった
-（[profiling.md](profiling.md)）。alp で解析できる価値のほうが大きいので、
-**最後まで付けたままでよい**。
-
-ただし**計測ごとに空にする**。しないと alp が複数走行の累積を集計する。
+（[profiling.md](profiling.md#計装は入れたままでよい)）。alp で解析できる価値のほうが
+大きいので、**最後まで付けたままでよい**。ただし計測ごとに空にすること。
