@@ -85,6 +85,17 @@ systemd サービスは `isuride-go`(`/home/isucon/webapp/go/isuride`)、`isurid
 ssh "isucon@$APP_HOST" 'cd /home/isucon/webapp && git pull && cd go && /usr/local/go/bin/go build -o isuride . && sudo systemctl restart isuride-go'
 ```
 
+### 設定ファイル (アプリコード以外)
+
+サーバ上の `/etc` と `/home/isucon` は `infra/` にミラーしてある。**サーバの設定を知りたいときは ssh せず `infra/` を読む**。詳細は `infra/README.md`。
+
+```bash
+bin/config pull       # サーバ → infra/ (広く取る)。変更は git status に出る
+bin/config push app   # infra/ → サーバ (MANIFEST のものだけ) + 反映コマンド
+```
+
+サーバ上で設定をいじったら **pull して commit する**。しないと複数台構成にしたときや作り直したときに静かに壊れる。
+
 ### ベンチマーク
 
 ローカルから `bash run_bench.sh`。`servers.env` を読んでベンチサーバーに ssh し、`bench run` を実行する。`--payment-url` は**ベンチサーバー自身の内部 IP**(`BENCH_PRIVATE_IP`)を指す必要がある。ここをアプリサーバーの IP にすると決済モックに届かず `evaluation` が全部 500 になる。

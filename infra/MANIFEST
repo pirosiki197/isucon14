@@ -1,0 +1,20 @@
+# push で配る対象と、配った後に叩くコマンド。狭く保つ。
+#
+#   <role>  <絶対パス>  <反映コマンド>
+#
+# role は servers.env の <ホスト名>_ROLES に書いたもの。* は全ホスト。
+# その role を持つホスト全部が対象になる (app が 2 台なら 2 台に配る)。
+# パスは infra/<ホスト名>/ 以下のローカルファイルに対して glob 展開される。
+# 末尾が / のパスはディレクトリごと配る (中身だけ。サーバ側にしか無いファイルは消さない)。
+# 反映コマンドは行末まで。同じコマンドは 1 回にまとめて実行される。
+#
+# 所有者とパーミッションはサーバ側の既存の値を保つ (git は保存しないので触らない)。
+# 新規に置くファイルで所有者を指定したいときは、反映コマンドの先頭で chown する。
+
+app  /etc/nginx/nginx.conf                     sudo nginx -t && sudo systemctl reload nginx
+app  /etc/nginx/sites-available/isuride.conf   sudo nginx -t && sudo systemctl reload nginx
+app  /etc/systemd/system/nginx.service.d/*.conf   sudo systemctl daemon-reload && sudo systemctl restart nginx
+app  /etc/systemd/system/isuride-*.service     sudo systemctl daemon-reload && sudo systemctl restart isuride-go
+app  /home/isucon/env.sh                       sudo chown isucon: /home/isucon/env.sh && sudo systemctl restart isuride-go isuride-matcher
+
+db   /etc/mysql/mysql.conf.d/z-isucon-*.cnf    sudo systemctl restart mysql

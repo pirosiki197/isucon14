@@ -1,0 +1,31 @@
+# pull (サーバ → infra/) するときに持ってこないもの。
+# パターンに / が無ければファイル名として、あれば末尾のパスとして照合される。
+
+# --- 秘密。リポジトリに入れてはいけない ---
+shadow
+shadow-
+gshadow
+gshadow-
+ssh_host_*_key
+ssl/private/
+mysql/debian.cnf
+credentials*
+*.key
+*.pem
+*.p12
+
+# --- 自動生成・毎回変わるもの。差分のノイズになる ---
+.git/
+ld.so.cache
+.pwd.lock
+blkid.tab*
+*.dpkg-old
+*.dpkg-dist
+*.dpkg-new
+*.ucf-old
+*.ucf-dist
+*.ucf-new
+
+# --- 中身が大きいだけで見ない ---
+ssl/certs/
+ca-certificates/

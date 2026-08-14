@@ -1,0 +1,355 @@
+#!/bin/bash
+# サーバ上の設定ファイルをリポジトリ (infra/) と同期する。
+#
+#   pull … サーバ → infra/。広く取る。何が変わったかはローカルの git status で見る
+#   push … infra/ → サーバ。MANIFEST に書いたものだけを配り、反映コマンドを叩く
+#   copy … infra/ の中で、あるホストの設定を別のホストにコピーする (台数を増やすとき)
+#
+# 使い方:
+#   bin/config pull [host|role...]        既定は servers.env の HOSTS 全部
+#   bin/config push <host|role> [path...] path 省略で MANIFEST のそのホスト分全部
+#   bin/config copy <src-host> <dst-host> [path...]
+#   bin/config status
+#
+#   -n  実際には転送せず、何をするかだけ出す
+
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+infra=infra
+exclude_file="$infra/rsync-exclude"
+pull_list="$infra/PULL"
+manifest="$infra/MANIFEST"
+
+dry=""
+
+die() {
+	echo "error: $*" >&2
+	exit 1
+}
+warn() { echo "warn:  $*" >&2; }
+
+usage() {
+	sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+	exit "${1:-1}"
+}
+
+load_env() {
+	[ -f servers.env ] || die "servers.env が無い (servers.env.example をコピーして作る)"
+	# shellcheck disable=SC1091
+	. ./servers.env
+	: "${HOSTS:?servers.env に HOSTS を設定してください (例: HOSTS=\"s1 s2 s3\")}"
+	ssh_user="${SSH_USER:-isucon}"
+}
+
+# ホスト名 foo に対して FOO_HOST / FOO_PRIVATE_IP / FOO_ROLES を引く
+hostvar() {
+	local name="$1" suffix="$2" var
+	[[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "ホスト名に使えない文字: $name"
+	var="${name^^}_$suffix"
+	echo "${!var:-}"
+}
+
+host_addr() { hostvar "$1" HOST; }
+host_roles() {
+	local r
+	r=$(hostvar "$1" ROLES)
+	echo "${r:-$1}" # 未指定ならホスト名そのものを role とみなす
+}
+
+is_host() {
+	local h
+	for h in $HOSTS; do [ "$h" = "$1" ] && return 0; done
+	return 1
+}
+
+# 引数をホスト名または role として解決し、対象ホストを列挙する
+resolve_hosts() {
+	local want="$1" h r found=""
+	if is_host "$want"; then
+		echo "$want"
+		return 0
+	fi
+	for h in $HOSTS; do
+		for r in $(host_roles "$h"); do
+			if [ "$r" = "$want" ]; then
+				echo "$h"
+				found=1
+				break
+			fi
+		done
+	done
+	[ -n "$found" ] || die "$want というホストも role も無い (HOSTS=\"$HOSTS\")"
+}
+
+host_has_role() {
+	local h="$1" want="$2" r
+	[ "$want" = '*' ] && return 0
+	for r in $(host_roles "$h"); do [ "$r" = "$want" ] && return 0; done
+	return 1
+}
+
+# role を指定して呼ばれたときは、その role の行だけを対象にする。
+# ホスト名で呼ばれたとき (role_filter が空) は、そのホストの全 role が対象。
+# '*' の行は role_filter によらず常に対象。
+entry_applies() {
+	local host="$1" entry_role="$2" role_filter="$3"
+	[ "$entry_role" = '*' ] && return 0
+	if [ -n "$role_filter" ]; then
+		[ "$entry_role" = "$role_filter" ] || return 1
+	fi
+	host_has_role "$host" "$entry_role"
+}
+
+# コメント行と空行を落とす
+table() { grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$1"; }
+
+# rsync の 23/24 は「一部のファイルが無かった」なので警告に留める
+run_rsync() {
+	local rc=0
+	rsync "$@" || rc=$?
+	case "$rc" in
+	0) ;;
+	23 | 24) warn "rsync exit $rc: 一部のパスをスキップした" ;;
+	*) return "$rc" ;;
+	esac
+}
+
+show_changes() {
+	echo
+	echo "== 変更 (git status)"
+	local n
+	n=$(git status --porcelain -- "$infra" | wc -l)
+	if [ "$n" -eq 0 ]; then
+		echo "   (変更なし)"
+		return 0
+	fi
+	git status --porcelain -- "$infra" | head -40
+	[ "$n" -gt 40 ] && echo "   ... 他 $((n - 40)) 件"
+	return 0
+}
+
+cmd_pull() {
+	local -a hosts=()
+	local role_filter=""
+	if [ "$#" -eq 0 ]; then
+		hosts=($HOSTS)
+	else
+		local a
+		for a in "$@"; do
+			hosts+=($(resolve_hosts "$a"))
+			is_host "$a" || role_filter="$a"
+		done
+	fi
+
+	local host addr r path dest
+	local -a opts
+	for host in "${hosts[@]}"; do
+		addr=$(host_addr "$host")
+		[ -n "$addr" ] || {
+			warn "$host: ${host^^}_HOST が servers.env に無い。skip"
+			continue
+		}
+		echo "== pull $host ($addr) roles=[$(host_roles "$host")]"
+
+		while read -r r path; do
+			entry_applies "$host" "$r" "$role_filter" || continue
+			dest="$infra/$host/${path#/}"
+			opts=(-rlpt --human-readable --exclude-from="$exclude_file" --rsync-path='sudo rsync')
+			[ -n "$dry" ] && opts+=(--dry-run)
+
+			if [ "${path: -1}" = "/" ]; then
+				mkdir -p "$dest"
+				opts+=(--delete)
+			else
+				mkdir -p "$(dirname "$dest")"
+			fi
+
+			echo "   $path"
+			run_rsync "${opts[@]}" "$ssh_user@$addr:$path" "$dest"
+		done < <(table "$pull_list")
+	done
+
+	show_changes
+}
+
+# MANIFEST を展開して files/remotes/reloads に積む。
+# $1=ホスト名, $2=ソースのホスト名(通常は同じ。copy のときだけ違う),
+# $3=role の絞り込み(空なら全部), 残り=パスの絞り込み
+collect_manifest() {
+	local host="$1" src="$2" role_filter="$3"
+	shift 3
+	local -a filter=("$@")
+	local r path reload local_glob m remote want f
+
+	files=()
+	remotes=()
+	reloads=()
+
+	while read -r r path reload; do
+		entry_applies "$host" "$r" "$role_filter" || continue
+
+		local_glob="$infra/$src/${path#/}"
+		shopt -s nullglob
+		local -a matches=($local_glob)
+		shopt -u nullglob
+
+		if [ "${#matches[@]}" -eq 0 ]; then
+			[ "${#filter[@]}" -eq 0 ] && warn "ローカルに無い: $local_glob (先に pull する)"
+			continue
+		fi
+
+		for m in "${matches[@]}"; do
+			# 末尾が / の行はディレクトリごと配る
+			if [ "${path: -1}" = "/" ]; then
+				[ -d "$m" ] || continue
+			else
+				[ -f "$m" ] || continue
+			fi
+			remote="/${m#"$infra/$src/"}"
+			if [ "${#filter[@]}" -gt 0 ]; then
+				want=""
+				for f in "${filter[@]}"; do
+					if [ "$f" = "$path" ] || [ "$f" = "$remote" ]; then want=1; fi
+				done
+				[ -n "$want" ] || continue
+			fi
+			files+=("$m")
+			remotes+=("$remote")
+			reloads+=("$reload")
+		done
+	done < <(table "$manifest")
+}
+
+push_one_host() {
+	local host="$1" role_filter="$2"
+	shift 2
+	local addr
+	addr=$(host_addr "$host")
+	[ -n "$addr" ] || die "$host: ${host^^}_HOST が servers.env に無い"
+
+	local -a files remotes reloads
+	collect_manifest "$host" "$host" "$role_filter" "$@"
+	[ "${#files[@]}" -gt 0 ] || {
+		warn "$host: 配るものが無い"
+		return 0
+	}
+
+	echo "== push $host ($addr)"
+	local i
+	local -a opts
+	for i in "${!files[@]}"; do
+		echo "   ${files[$i]} -> ${remotes[$i]}"
+		[ -n "$dry" ] && continue
+		# 所有者とパーミッションは既存のものを保つので -a は使わない
+		opts=(-t --human-readable --rsync-path='sudo rsync')
+		if [ -d "${files[$i]}" ]; then
+			# ディレクトリは中身を配る。--delete はしない (サーバ側にしか無いファイルを消さない)
+			ssh "$ssh_user@$addr" "sudo mkdir -p ${remotes[$i]}"
+			run_rsync -r "${opts[@]}" "${files[$i]%/}/" "$ssh_user@$addr:${remotes[$i]%/}/"
+		else
+			ssh "$ssh_user@$addr" "sudo mkdir -p $(dirname "${remotes[$i]}")"
+			run_rsync "${opts[@]}" "${files[$i]}" "$ssh_user@$addr:${remotes[$i]}"
+		fi
+	done
+
+	# 同じ反映コマンドは 1 回にまとめる
+	local -a done_cmds=()
+	local c d seen
+	for c in "${reloads[@]}"; do
+		[ -n "$c" ] || continue
+		seen=""
+		for d in "${done_cmds[@]:-}"; do
+			if [ "$d" = "$c" ]; then seen=1; fi
+		done
+		[ -n "$seen" ] && continue
+		done_cmds+=("$c")
+		echo "== reload $host: $c"
+		[ -n "$dry" ] && continue
+		ssh "$ssh_user@$addr" "$c"
+	done
+}
+
+cmd_push() {
+	[ "$#" -ge 1 ] || usage
+	local target="$1"
+	shift
+	local h role_filter=""
+	is_host "$target" || role_filter="$target"
+	for h in $(resolve_hosts "$target"); do
+		push_one_host "$h" "$role_filter" "$@"
+	done
+}
+
+cmd_copy() {
+	[ "$#" -ge 2 ] || usage
+	local src="$1" dst="$2"
+	shift 2
+	is_host "$src" || die "$src はホスト名ではない"
+	is_host "$dst" || die "$dst はホスト名ではない"
+	[ -d "$infra/$src" ] || die "$infra/$src が無い (先に pull する)"
+
+	local -a files remotes reloads
+	collect_manifest "$dst" "$src" "" "$@"
+	[ "${#files[@]}" -gt 0 ] ||
+		die "コピーするものが無い ($dst の role は [$(host_roles "$dst")]。servers.env の ${dst^^}_ROLES を確認する)"
+
+	echo "== copy $src -> $dst (ローカルのみ。反映は push $dst)"
+	local i dest
+	for i in "${!files[@]}"; do
+		dest="$infra/$dst/${remotes[$i]#/}"
+		echo "   ${files[$i]} -> $dest"
+		[ -n "$dry" ] && continue
+		if [ -d "${files[$i]}" ]; then
+			mkdir -p "$dest"
+			cp -a "${files[$i]%/}/." "${dest%/}/"
+		else
+			mkdir -p "$(dirname "$dest")"
+			cp -p "${files[$i]}" "$dest"
+		fi
+	done
+
+	show_changes
+	echo
+	echo "   差分を確認してから: bin/config push $dst"
+}
+
+cmd_status() {
+	local h addr n
+	printf '%-8s %-16s %-16s %s\n' HOST ADDR ROLES FILES
+	for h in $HOSTS; do
+		addr=$(host_addr "$h")
+		n=0
+		[ -d "$infra/$h" ] && n=$(find "$infra/$h" -type f | wc -l)
+		printf '%-8s %-16s %-16s %s\n' "$h" "${addr:-(未設定)}" "$(host_roles "$h")" "$n"
+	done
+	show_changes
+}
+
+main() {
+	local -a args=()
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+		-n | --dry-run) dry=1 ;;
+		-h | --help) usage 0 ;;
+		*) args+=("$1") ;;
+		esac
+		shift
+	done
+	[ "${#args[@]}" -ge 1 ] || usage
+
+	command -v rsync >/dev/null || die "rsync が無い。sudo apt install rsync"
+	load_env
+
+	local sub="${args[0]}"
+	set -- "${args[@]:1}"
+	case "$sub" in
+	pull) cmd_pull "$@" ;;
+	push) cmd_push "$@" ;;
+	copy) cmd_copy "$@" ;;
+	status) cmd_status "$@" ;;
+	*) usage ;;
+	esac
+}
+
+main "$@"
