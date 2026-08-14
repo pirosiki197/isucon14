@@ -62,7 +62,15 @@ API 仕様は `openapi.yaml`、フロントエンドのビルド済み成果物�
 
 ## サーバーでの計測と運用
 
-競技サーバーは `ssh isucon@54.249.96.239`(内部 IP `172.31.33.90`)。`sudo` は NOPASSWD。2 vCPU / 3.8GB なので、計測エージェント自体の負荷も無視できない。ベンチマーカーは別インスタンス `13.231.124.9`(内部 IP `172.31.38.72`)にある。
+アドレスは**リポジトリに含めない**。`servers.env`(gitignore 済み、`servers.env.example` がテンプレート)に書いてあるので、必要なら読む。
+
+| 変数 | 役割 |
+|---|---|
+| `APP_HOST` / `APP_PRIVATE_IP` | アプリ + nginx。2 vCPU / 3.8GB |
+| `DB_HOST` / `DB_PRIVATE_IP` | MySQL |
+| `BENCH_HOST` / `BENCH_PRIVATE_IP` | ベンチマーカー。2 vCPU |
+
+いずれも `ssh isucon@<host>` で入れて `sudo` は NOPASSWD。2 vCPU しかないので、計測エージェント自体の負荷も無視できない。
 
 systemd サービスは `isuride-go`(`/home/isucon/webapp/go/isuride`)、`isuride-matcher`、`mysql`、`nginx`、`alloy`。環境変数は `/home/isucon/env.sh`(`EnvironmentFile` として読まれる)。
 
@@ -73,21 +81,23 @@ systemd サービスは `isuride-go`(`/home/isucon/webapp/go/isuride`)、`isurid
 ### デプロイ
 
 ```bash
-ssh isucon@54.249.96.239 'cd /home/isucon/webapp && git pull && cd go && /usr/local/go/bin/go build -o isuride . && sudo systemctl restart isuride-go'
+. ./servers.env
+ssh "isucon@$APP_HOST" 'cd /home/isucon/webapp && git pull && cd go && /usr/local/go/bin/go build -o isuride . && sudo systemctl restart isuride-go'
 ```
 
 ### ベンチマーク
 
-ローカルから `bash run_bench.sh`。ベンチサーバーに ssh して `bench run` を実行する。`--payment-url` は**ベンチサーバーの内部 IP**(`172.31.38.72`)を指す必要がある。ここをアプリサーバーの IP にすると決済モックに届かず `evaluation` が全部 500 になる。
+ローカルから `bash run_bench.sh`。`servers.env` を読んでベンチサーバーに ssh し、`bench run` を実行する。`--payment-url` は**ベンチサーバー自身の内部 IP**(`BENCH_PRIVATE_IP`)を指す必要がある。ここをアプリサーバーの IP にすると決済モックに届かず `evaluation` が全部 500 になる。
 
 ### slow query の解析
 
 `long_query_time = 0` で全クエリを記録する(`/etc/mysql/mysql.conf.d/z-isucon-slow.cnf`)。ベンチ 1 回で約 54MB 増えるので、計測ごとに空にしてから回す。
 
 ```bash
-ssh isucon@54.249.96.239 'sudo truncate -s 0 /var/log/mysql/mysql-slow.log'
+. ./servers.env
+ssh "isucon@$DB_HOST" 'sudo truncate -s 0 /var/log/mysql/mysql-slow.log'
 bash run_bench.sh
-ssh isucon@54.249.96.239 'sudo pt-query-digest --limit 20 /var/log/mysql/mysql-slow.log > /tmp/digest.txt; sed -n "1,12p;/# Profile/,/^$/p" /tmp/digest.txt'
+ssh "isucon@$DB_HOST" 'sudo pt-query-digest --limit 20 /var/log/mysql/mysql-slow.log > /tmp/digest.txt; sed -n "1,12p;/# Profile/,/^$/p" /tmp/digest.txt'
 ```
 
 計測しないときは `sudo mysql -e "SET GLOBAL slow_query_log = OFF;"` で即座に止まる(設定ファイルは残るので再起動で復活する)。

@@ -1,0 +1,5 @@
+# サーバーのアドレスはリポジトリに含めない (servers.env.example がテンプレート)
+/servers.env
+
+# ビルド成果物
+/go/isuride
